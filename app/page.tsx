@@ -138,6 +138,8 @@ export default function Home() {
   const [expandingNodes, setExpandingNodes] = useState<Set<string>>(new Set())
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set())
   const [recentSessions, setRecentSessions] = useState<DbSession[]>([])
+  const [showHistory, setShowHistory] = useState(false)
+  const historyRef = useRef<HTMLDivElement>(null)
   const loadedThreadsRef = useRef<Set<string>>(new Set())
   // Mirror of `expandingNodes` for synchronous read-then-write guarding —
   // rapid double-clicks would otherwise both see an empty set and both fire.
@@ -211,6 +213,24 @@ export default function Home() {
       })
       .catch(() => {})
   }, [selectedNode])
+
+  useEffect(() => {
+    if (!showHistory) return
+    function onKey(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') setShowHistory(false)
+    }
+    function onPointerDown(e: PointerEvent) {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        setShowHistory(false)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [showHistory])
 
   const childCountByParent = useMemo(() => {
     const m = new Map<string, number>()
@@ -402,11 +422,49 @@ export default function Home() {
 
   return (
     <main className="flex flex-col h-screen bg-slate-950">
-      <header className="flex items-center gap-3 px-6 py-4 border-b border-slate-800 shrink-0">
+      <header className="flex items-center gap-3 px-6 py-4 border-b border-slate-800 shrink-0 relative">
         <div className="w-2 h-2 rounded-full bg-indigo-500" />
-        <h1 className="text-slate-100 font-semibold text-sm tracking-wide">
+        <h1 className="text-slate-100 font-semibold text-sm tracking-wide flex-1">
           Diagram Learning
         </h1>
+        <div ref={historyRef} className="relative">
+          <button
+            onClick={() => setShowHistory(v => !v)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
+            aria-label="Session history"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m6-2a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z" />
+            </svg>
+            History
+          </button>
+          {showHistory && (
+            <div className="absolute right-0 top-full mt-1 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+              <p className="px-4 py-2.5 text-xs text-slate-500 uppercase tracking-widest border-b border-slate-800">
+                Recent sessions
+              </p>
+              {recentSessions.length === 0 ? (
+                <p className="px-4 py-4 text-sm text-slate-600 text-center">No sessions yet.</p>
+              ) : (
+                <ul className="max-h-72 overflow-y-auto">
+                  {recentSessions.map(s => (
+                    <li key={s.id}>
+                      <button
+                        onClick={() => { handleLoadSession(s.id, s.topic); setShowHistory(false) }}
+                        className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-slate-800 transition-colors group"
+                      >
+                        <span className="text-slate-200 text-sm truncate mr-3">{s.topic}</span>
+                        <span className="text-slate-600 text-xs shrink-0 group-hover:text-slate-400">
+                          {new Date(s.createdAt).toLocaleDateString()}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
       </header>
 
       {nodePath.length > 0 && (
