@@ -1,16 +1,19 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import { ReactFlow, Background, Controls, Handle, Position, type NodeProps, type Node } from '@xyflow/react'
+import { useEffect, useCallback } from 'react'
+import {
+  ReactFlow, Background, Controls, Handle, Position,
+  useNodesState, type NodeProps, type Node,
+} from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { NodeInfo } from '@/lib/types'
 
-const NODE_WIDTH = 160
-const NODE_GAP = 30
+const NODE_WIDTH = 180
+const NODE_GAP = 40
 
 function buildFlowNodes(nodes: NodeInfo[], selectedNodeId: string | null) {
   const childCount = nodes.length - 1
-  const totalWidth = childCount * NODE_WIDTH + (childCount - 1) * NODE_GAP
+  const totalWidth = Math.max(0, childCount * NODE_WIDTH + (childCount - 1) * NODE_GAP)
   const rootX = totalWidth / 2 - NODE_WIDTH / 2
 
   return nodes.map((node, i) => ({
@@ -19,7 +22,7 @@ function buildFlowNodes(nodes: NodeInfo[], selectedNodeId: string | null) {
     position:
       i === 0
         ? { x: rootX, y: 40 }
-        : { x: (i - 1) * (NODE_WIDTH + NODE_GAP), y: 220 },
+        : { x: (i - 1) * (NODE_WIDTH + NODE_GAP), y: 240 },
     data: {
       label: node.label,
       description: node.description,
@@ -36,7 +39,7 @@ function TopicNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`px-4 py-3 rounded-xl border text-sm font-semibold min-w-[150px] text-center shadow-lg select-none cursor-pointer transition-all ${
+      className={`px-4 py-3 rounded-xl border text-sm font-semibold w-[180px] text-center shadow-lg select-none cursor-pointer transition-all leading-snug ${
         isRoot
           ? isSelected
             ? 'bg-indigo-500 border-white text-white ring-2 ring-white/20'
@@ -66,11 +69,22 @@ type Props = {
 }
 
 export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClick }: Props) {
-  const [flowNodes, setFlowNodes] = useState(() => buildFlowNodes(nodes, selectedNodeId))
+  const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(
+    buildFlowNodes(nodes, selectedNodeId)
+  )
 
+  // Rebuild positions when the node list changes (new diagram)
   useEffect(() => {
     setFlowNodes(buildFlowNodes(nodes, selectedNodeId))
-  }, [nodes, selectedNodeId])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes])
+
+  // Update selection highlight without resetting drag positions
+  useEffect(() => {
+    setFlowNodes(prev =>
+      prev.map(n => ({ ...n, data: { ...n.data, isSelected: n.id === selectedNodeId } }))
+    )
+  }, [selectedNodeId, setFlowNodes])
 
   const flowEdges = edges.map(e => ({ ...e, style: edgeStyle }))
 
@@ -88,11 +102,11 @@ export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClic
         nodes={flowNodes}
         edges={flowEdges}
         nodeTypes={nodeTypes}
-        nodesDraggable={false}
+        onNodesChange={onNodesChange}
         nodesConnectable={false}
         onNodeClick={handleNodeClick}
         fitView
-        fitViewOptions={{ padding: 0.2 }}
+        fitViewOptions={{ padding: 0.25 }}
         proOptions={{ hideAttribution: true }}
       >
         <Background color="#1e293b" gap={24} />

@@ -1,31 +1,25 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import type { NodeInfo } from '@/lib/types'
-
-type Message = {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-}
+import type { NodeInfo, Message } from '@/lib/types'
 
 type Props = {
   node: NodeInfo
   onClose: () => void
+  messages: Message[]
+  onMessagesChange: (messages: Message[]) => void
 }
 
-export default function NodePanel({ node, onClose }: Props) {
+export default function NodePanel({ node, onClose, messages, onMessagesChange }: Props) {
   const [activeTab, setActiveTab] = useState<'description' | 'ask'>('description')
-  const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setMessages([])
+    setActiveTab('description')
     setInput('')
     setIsTyping(false)
-    setActiveTab('description')
   }, [node.id])
 
   useEffect(() => {
@@ -36,19 +30,18 @@ export default function NodePanel({ node, onClose }: Props) {
     const text = input.trim()
     if (!text || isTyping) return
 
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: text }])
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: text }
+    onMessagesChange([...messages, userMsg])
     setInput('')
     setIsTyping(true)
 
     setTimeout(() => {
-      setMessages(prev => [
-        ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: `AI answers will be live in Phase 4.5. Your question about "${node.label}" is noted — keep exploring!`,
-        },
-      ])
+      const reply: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: `AI answers will be live in Phase 4.5. Your question about "${node.label}" is noted — keep exploring!`,
+      }
+      onMessagesChange([...messages, userMsg, reply])
       setIsTyping(false)
     }, 800)
   }
@@ -56,7 +49,6 @@ export default function NodePanel({ node, onClose }: Props) {
   return (
     <div className="w-96 h-full flex flex-col border-l border-slate-800 bg-slate-900 shrink-0">
 
-      {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 shrink-0">
         <h2 className="text-slate-100 font-semibold text-sm truncate pr-4">{node.label}</h2>
         <button
@@ -68,7 +60,6 @@ export default function NodePanel({ node, onClose }: Props) {
         </button>
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-slate-800 shrink-0">
         {(['description', 'ask'] as const).map(tab => (
           <button
@@ -80,12 +71,11 @@ export default function NodePanel({ node, onClose }: Props) {
                 : 'text-slate-500 hover:text-slate-300'
             }`}
           >
-            {tab === 'description' ? 'Description' : 'Ask'}
+            {tab === 'description' ? 'Description' : `Ask${messages.length > 0 ? ` (${messages.filter(m => m.role === 'user').length})` : ''}`}
           </button>
         ))}
       </div>
 
-      {/* Description tab */}
       {activeTab === 'description' && (
         <div className="flex-1 overflow-y-auto px-5 py-5">
           {node.description ? (
@@ -98,7 +88,6 @@ export default function NodePanel({ node, onClose }: Props) {
         </div>
       )}
 
-      {/* Ask tab */}
       {activeTab === 'ask' && (
         <div className="flex flex-col flex-1 min-h-0">
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">

@@ -12,7 +12,8 @@ export async function generateRootNode(topic: string): Promise<GenerateResponse>
         role: 'user',
         content: `You are a learning assistant. Given a topic, return a JSON object with:
 - "description": a clear 2-3 sentence overview of the topic
-- "children": an array of 4-6 key subtopic titles to explore
+- "needsDiagram": true if the topic has 4-6 distinct subtopics worth exploring visually, false if it is a simple or self-contained concept
+- "children": array of 4-6 subtopic titles if needsDiagram is true, otherwise an empty array
 
 Return ONLY valid JSON, no markdown, no explanation.
 

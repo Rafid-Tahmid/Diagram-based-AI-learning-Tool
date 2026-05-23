@@ -4,7 +4,7 @@ import { useState, useCallback } from 'react'
 import DiagramCanvas from '@/components/DiagramCanvas'
 import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
-import type { NodeInfo, GenerateResponse } from '@/lib/types'
+import type { NodeInfo, Message, GenerateResponse } from '@/lib/types'
 
 type DiagramState = {
   nodes: NodeInfo[]
@@ -12,16 +12,15 @@ type DiagramState = {
 }
 
 function buildDiagram(topic: string, data: GenerateResponse): DiagramState {
-  const nodes: NodeInfo[] = [
-    { id: 'root', label: topic, description: data.description },
-    ...data.children.map((title, i) => ({ id: `child-${i}`, label: title })),
-  ]
-  const edges = data.children.map((_, i) => ({
-    id: `e-root-${i}`,
-    source: 'root',
-    target: `child-${i}`,
-  }))
-  return { nodes, edges }
+  const root: NodeInfo = { id: 'root', label: topic, description: data.description }
+
+  if (!data.needsDiagram || data.children.length === 0) {
+    return { nodes: [root], edges: [] }
+  }
+
+  const children = data.children.map((title, i) => ({ id: `child-${i}`, label: title }))
+  const edges = children.map((c, i) => ({ id: `e-root-${i}`, source: 'root', target: c.id }))
+  return { nodes: [root, ...children], edges }
 }
 
 export default function Home() {
@@ -30,6 +29,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [selectedNode, setSelectedNode] = useState<NodeInfo | null>(null)
   const [nodePath, setNodePath] = useState<NodeInfo[]>([])
+  const [nodeMessages, setNodeMessages] = useState<Map<string, Message[]>>(new Map())
 
   const handleSubmit = useCallback(async () => {
     const topic = inputValue.trim()
@@ -39,6 +39,7 @@ export default function Home() {
     setDiagram(null)
     setSelectedNode(null)
     setNodePath([])
+    setNodeMessages(new Map())
 
     const res = await fetch('/api/generate', {
       method: 'POST',
@@ -46,7 +47,12 @@ export default function Home() {
       body: JSON.stringify({ topic }),
     })
     const json = await res.json() as { data: GenerateResponse }
-    setDiagram(buildDiagram(topic, json.data))
+    const built = buildDiagram(topic, json.data)
+    const root = built.nodes[0]
+
+    setDiagram(built)
+    setSelectedNode(root)
+    setNodePath([root])
     setLoading(false)
   }, [inputValue, loading])
 
@@ -67,6 +73,10 @@ export default function Home() {
     setNodePath([])
   }, [])
 
+  const handleMessagesChange = useCallback((nodeId: string, messages: Message[]) => {
+    setNodeMessages(prev => new Map(prev).set(nodeId, messages))
+  }, [])
+
   return (
     <main className="flex flex-col h-screen bg-slate-950">
       <header className="flex items-center gap-3 px-6 py-4 border-b border-slate-800 shrink-0">
@@ -85,7 +95,6 @@ export default function Home() {
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 min-w-0 flex flex-col">
 
-          {/* Topic input bar */}
           <div className="px-6 py-3 border-b border-slate-800 shrink-0 flex gap-3">
             <input
               type="text"
@@ -105,7 +114,6 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Canvas area */}
           <div className="flex-1 min-h-0">
             {!diagram && !loading && (
               <div className="flex items-center justify-center h-full">
@@ -115,7 +123,7 @@ export default function Home() {
             {loading && (
               <div className="flex items-center justify-center h-full gap-2">
                 <div className="w-4 h-4 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-                <p className="text-slate-400 text-sm">Generating diagram…</p>
+                <p className="text-slate-400 text-sm">Generating…</p>
               </div>
             )}
             {diagram && (
@@ -130,7 +138,12 @@ export default function Home() {
         </div>
 
         {selectedNode && (
-          <NodePanel node={selectedNode} onClose={handleClose} />
+          <NodePanel
+            node={selectedNode}
+            onClose={handleClose}
+            messages={nodeMessages.get(selectedNode.id) ?? []}
+            onMessagesChange={msgs => handleMessagesChange(selectedNode.id, msgs)}
+          />
         )}
       </div>
     </main>
