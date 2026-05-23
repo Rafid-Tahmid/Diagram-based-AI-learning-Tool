@@ -37,7 +37,9 @@ function dbMsgToMessage(row: DbQAMessage): Message {
     content: row.content,
     classifications,
     offerDiagram: false,
-    diagramAccepted: classifications !== undefined ? true : undefined,
+    // Don't auto-accept the diagram on reload — we can't know if the user
+    // accepted or declined. Classifications still render as info cards.
+    diagramAccepted: false,
   }
 }
 
@@ -218,6 +220,7 @@ export default function Home() {
     setSelectedNode(null)
     setNodePath([])
     setNodeMessages(new Map())
+    setCollapsedNodes(new Set())
     loadedThreadsRef.current = new Set()
 
     try {

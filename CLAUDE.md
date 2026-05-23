@@ -308,3 +308,8 @@ Next up: Phase 5 (multi-model routing).
 - Threads are lazy-loaded on first node select via a `loadedThreadsRef` fetch-once guard; `nodeMessages` Map is the in-memory cache
 - Historical messages restored with `diagramAccepted: true` if `diagram` field present — no re-offer prompt for old threads
 - Dev server must restart after `prisma db push` — `globalThis.prisma` caches the old client instance across HMR
+
+**Post-Phase-4.5 hardening / bug-fix pass:**
+- `diagramAccepted` is NOT restored on reload — we can't distinguish accepted vs declined from DB; classifications render as info cards only, no auto-diagram
+- Orphaned user messages are cleaned up on AI failure — POST saves the user message first, then deletes it if `answerQuestion` throws, keeping the thread consistent
+- `collapsedNodes` is now reset in `handleSubmit` alongside `nodes`, `nodeMessages`, and `loadedThreadsRef` — prevents stale IDs from a prior session lingering in the Set

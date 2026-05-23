@@ -70,9 +70,11 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
+  let userMsg: { id: string } | null = null
   try {
-    await prisma.qAMessage.create({
+    userMsg = await prisma.qAMessage.create({
       data: { nodeId: body.nodeId, role: 'user', content: body.question },
+      select: { id: true },
     })
 
     const data = await answerQuestion(
@@ -94,6 +96,11 @@ export async function POST(request: Request) {
 
     return Response.json({ data })
   } catch (err) {
+    // Remove the orphaned user message so a failed Q&A doesn't leave a
+    // question in the DB with no answer.
+    if (userMsg) {
+      await prisma.qAMessage.delete({ where: { id: userMsg.id } }).catch(() => {})
+    }
     console.error('answerQuestion failed:', err)
     const message = err instanceof Error ? err.message : 'Q&A failed'
     return Response.json({ error: message }, { status: 500 })
