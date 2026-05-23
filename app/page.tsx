@@ -18,7 +18,11 @@ function buildDiagram(topic: string, data: GenerateResponse): DiagramState {
     return { nodes: [root], edges: [] }
   }
 
-  const children = data.children.map((title, i) => ({ id: `child-${i}`, label: title }))
+  const children = data.children.map((c, i) => ({
+    id: `child-${i}`,
+    label: c.title,
+    description: c.description,
+  }))
   const edges = children.map((c, i) => ({ id: `e-root-${i}`, source: 'root', target: c.id }))
   return { nodes: [root, ...children], edges }
 }
@@ -143,6 +147,7 @@ export default function Home() {
             onClose={handleClose}
             messages={nodeMessages.get(selectedNode.id) ?? []}
             onMessagesChange={msgs => handleMessagesChange(selectedNode.id, msgs)}
+            ancestorPath={nodePath.map(n => n.label).join(' > ')}
           />
         )}
       </div>

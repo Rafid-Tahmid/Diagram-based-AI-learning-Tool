@@ -8,7 +8,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import type { NodeInfo } from '@/lib/types'
 
-const NODE_WIDTH = 180
+const NODE_WIDTH = 200
 const NODE_GAP = 40
 
 function buildFlowNodes(nodes: NodeInfo[], selectedNodeId: string | null) {
@@ -36,10 +36,11 @@ function TopicNode({ data }: NodeProps) {
   const isRoot = data.isRoot as boolean
   const isSelected = data.isSelected as boolean
   const label = data.label as string
+  const description = data.description as string | undefined
 
   return (
     <div
-      className={`px-4 py-3 rounded-xl border text-sm font-semibold w-[180px] text-center shadow-lg select-none cursor-pointer transition-all leading-snug ${
+      className={`px-4 py-3 rounded-xl border w-[200px] shadow-lg select-none cursor-pointer transition-all text-left ${
         isRoot
           ? isSelected
             ? 'bg-indigo-500 border-white text-white ring-2 ring-white/20'
@@ -50,7 +51,14 @@ function TopicNode({ data }: NodeProps) {
       }`}
     >
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      {label}
+      <div className="text-sm font-semibold leading-snug">{label}</div>
+      {description && (
+        <div className={`text-xs mt-1.5 leading-relaxed font-normal ${
+          isRoot || isSelected ? 'text-white/70' : 'text-slate-400'
+        }`}>
+          {description}
+        </div>
+      )}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
   )
