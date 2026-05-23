@@ -16,6 +16,9 @@ export type ProviderCallArgs = {
   system?: string
   messages: { role: 'user' | 'assistant'; content: string }[]
   maxTokens: number
+  // Per-call timeout in ms. Providers translate this to whatever native
+  // option they support; gemini does it via Promise.race.
+  timeoutMs?: number
 }
 
 export function pickModel(input: RouteInput): ModelChoice {
@@ -47,4 +50,30 @@ export function promote(choice: ModelChoice): ModelChoice {
     return { provider: 'anthropic', model: 'claude-sonnet-4-6' }
   }
   return choice
+}
+
+// Decide whether an error from a provider is worth retrying. Retry transient
+// failures (5xx, network, rate-limit, request timeout, JSON parse failures);
+// skip 4xx client errors that would just fail again with the same input
+// (bad model name, bad request, auth error, content-policy refusal, etc.).
+export function isRetriable(err: unknown): boolean {
+  if (!(err instanceof Error)) return true
+
+  // Our own JSON parse failures from lib/ai.ts — promoting to a stronger
+  // model usually fixes these because cheaper models malform JSON more.
+  if (err.message.startsWith('Model returned non-JSON')) return true
+
+  // Timeouts (Anthropic SDK, our Gemini Promise.race, AbortError).
+  if (err.name === 'AbortError') return true
+  if (/timed out|timeout/i.test(err.message)) return true
+
+  // SDK-typed errors carry a numeric status when the provider responded.
+  const status = (err as { status?: unknown }).status
+  if (typeof status === 'number') {
+    if (status === 408 || status === 429) return true
+    return status >= 500
+  }
+
+  // No status field → assume network / unknown transient.
+  return true
 }

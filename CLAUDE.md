@@ -259,6 +259,32 @@ a structured `console.log` per call. Routing table: root → Sonnet; expand (dep
 expand (depth ≥ 4) → Gemini Flash; qa (historyLen < 10) → Sonnet; qa (historyLen ≥ 10) → Gemini Flash.
 Fixed `/api/generate` passing `rawTopic` as its own ancestor — root calls now correctly pass `''`.
 
+**Post-Phase-5 hardening pass:**
+- Provider clients (Anthropic, OpenAI, Gemini) are now lazy-instantiated inside
+  each `callJson`. Top-level `new OpenAI()` previously crashed the entire app
+  at boot if `OPENAI_API_KEY` was missing, even though the current router
+  never routes to OpenAI. `lib/ai.ts` no longer asserts the OPENAI / GOOGLE
+  keys either; each provider asserts its own key only when actually called.
+- `withRetry` now classifies errors via `isRetriable` (lib/router.ts) before
+  retrying. Previously every error triggered a retry — a 400 (bad model name,
+  bad prompt, content-policy refusal) wasted a second call against the
+  promoted model. We now retry only on 5xx, 408, 429, network errors,
+  timeouts, AbortError, and our own JSON-parse failures.
+- On retry exhaustion (or when initial is already the strongest tier), the
+  original error is preserved as `cause` on the thrown wrapper. The previous
+  "already the strongest tier" message gave no clue about WHY the call failed
+  (rate limit? timeout? content policy?).
+- First-attempt failure is now `console.warn`'d with attempt=1 metadata so
+  retries are visible in observability even when the second attempt succeeds.
+- Small jittered backoff (200ms + up to 200ms jitter) between attempts so we
+  don't immediately re-hit a rate limit cap.
+- All provider calls now run with a 60s timeout. Anthropic and OpenAI accept
+  it natively; Gemini is wrapped in `Promise.race` against a timer because
+  the SDK exposes no timeout option.
+- OpenAI provider switched from the deprecated `max_tokens` to
+  `max_completion_tokens` — latent bug because the router doesn't currently
+  pick OpenAI, but the field is required for reasoning models in SDK v5+.
+
 ### Phase 6 — RAG / Knowledge Grounding (not started)
 **Goal:** Before generating an explanation, retrieve relevant context chunks from
 a knowledge source (Wikipedia API or embedded document store). Explanations are
@@ -327,6 +353,13 @@ Next up: Phase 6 (RAG / knowledge grounding).
 - `pickModel` routes on taskType + depth + historyLen; `promote` upgrades the tier on retry (Haiku → Sonnet, Gemini → Sonnet)
 - `/api/generate` must pass `''` as ancestorPath (not the topic itself) so root calls get `taskType: 'root'` and use Sonnet
 - One structured `console.log` per AI call: ts, taskType, provider, model, depth, historyLen, latencyMs, chars in/out, retried
+- Provider SDK clients are lazy-instantiated inside `callJson` — top-level `new OpenAI()` crashed boot if `OPENAI_API_KEY` was missing even though the router never picked OpenAI
+- `withRetry` classifies via `isRetriable(err)` before retrying — only 5xx / 408 / 429 / timeouts / network / JSON-parse errors retry; 4xx client errors fail fast and bubble immediately
+- Retry exhaustion preserves the original failure as `cause` and includes both error messages in the thrown wrapper — the old "already the strongest tier" message gave no hint why
+- First failure of every retried call is `console.warn`'d separately so retries are visible in observability
+- 200ms + 0–200ms jittered backoff before each retry to avoid burst rate-limit re-hits
+- 60s per-call timeout on every provider — Anthropic/OpenAI take it natively, Gemini is wrapped in `Promise.race` because its SDK has no timeout option
+- OpenAI provider uses `max_completion_tokens` (the modern replacement for the deprecated `max_tokens`) — latent until the router picks OpenAI
 
 **Post-Phase-4.5 hardening / bug-fix pass:**
 - `diagramAccepted` is NOT restored on reload — we can't distinguish accepted vs declined from DB; classifications render as info cards only, no auto-diagram

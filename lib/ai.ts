@@ -1,15 +1,27 @@
 import type { GenerateResponse, QAResponse } from '@/lib/types'
-import { pickModel, promote, type RouteInput, type ModelChoice, type ProviderCallArgs } from '@/lib/router'
+import {
+  pickModel,
+  promote,
+  isRetriable,
+  type RouteInput,
+  type ModelChoice,
+  type ProviderCallArgs,
+} from '@/lib/router'
 import { callJson as anthropicCall } from '@/lib/providers/anthropic'
 import { callJson as openaiCall } from '@/lib/providers/openai'
 import { callJson as geminiCall } from '@/lib/providers/gemini'
 
 const MAX_TOKENS_GENERATE = 1024
 const MAX_TOKENS_QA = 2048
+const REQUEST_TIMEOUT_MS = 60_000
+// Tiny backoff before retry so we don't immediately re-hit a rate limit.
+// Jittered to avoid lockstep retries across concurrent requests.
+const RETRY_BACKOFF_BASE_MS = 200
+const RETRY_BACKOFF_JITTER_MS = 200
 
-if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set')
-if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not set')
-if (!process.env.GOOGLE_AI_API_KEY) throw new Error('GOOGLE_AI_API_KEY is not set')
+// Per-provider env-var assertions are now made lazily inside each provider's
+// `callJson`. Asserting them at module load forced the entire app to depend
+// on every provider's key even though `pickModel` may never route to them.
 
 // ─── provider dispatch ───────────────────────────────────────────────────────
 
@@ -25,16 +37,62 @@ async function callProvider(choice: ModelChoice, args: Omit<ProviderCallArgs, 'm
 
 // ─── retry ───────────────────────────────────────────────────────────────────
 
+type Attempt<T> = { value: T; choice: ModelChoice; retried: boolean }
+
 async function withRetry<T>(
+  taskType: RouteInput['taskType'],
   initial: ModelChoice,
-  fn: (choice: ModelChoice) => Promise<T>
-): Promise<{ value: T; choice: ModelChoice }> {
+  fn: (choice: ModelChoice) => Promise<T>,
+): Promise<Attempt<T>> {
   try {
-    return { value: await fn(initial), choice: initial }
-  } catch {
+    return { value: await fn(initial), choice: initial, retried: false }
+  } catch (firstErr) {
+    // Log the first failure separately so retries are visible in observability
+    // even when the retried call eventually succeeds.
+    console.warn(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        event: 'ai-call-failed',
+        attempt: 1,
+        taskType,
+        provider: initial.provider,
+        model: initial.model,
+        retriable: isRetriable(firstErr),
+        error: firstErr instanceof Error ? firstErr.message : String(firstErr),
+      }),
+    )
+
+    if (!isRetriable(firstErr)) throw firstErr
+
     const promoted = promote(initial)
-    if (promoted.model === initial.model) throw new Error(`${initial.provider}/${initial.model} failed and is already the strongest tier`)
-    return { value: await fn(promoted), choice: promoted }
+    if (promoted.model === initial.model && promoted.provider === initial.provider) {
+      // Already on the strongest tier — preserve the original error as cause
+      // so the caller knows WHY it failed, not just that it did.
+      const wrapped = new Error(
+        `${initial.provider}/${initial.model} failed and is already the strongest tier: ${
+          firstErr instanceof Error ? firstErr.message : String(firstErr)
+        }`,
+      )
+      if (firstErr instanceof Error) (wrapped as Error & { cause?: unknown }).cause = firstErr
+      throw wrapped
+    }
+
+    // Small jittered backoff before the retry.
+    await new Promise(resolve =>
+      setTimeout(resolve, RETRY_BACKOFF_BASE_MS + Math.random() * RETRY_BACKOFF_JITTER_MS),
+    )
+
+    try {
+      return { value: await fn(promoted), choice: promoted, retried: true }
+    } catch (secondErr) {
+      const wrapped = new Error(
+        `Both ${initial.provider}/${initial.model} and ${promoted.provider}/${promoted.model} failed: ${
+          secondErr instanceof Error ? secondErr.message : String(secondErr)
+        }`,
+      )
+      if (secondErr instanceof Error) (wrapped as Error & { cause?: unknown }).cause = secondErr
+      throw wrapped
+    }
   }
 }
 
@@ -86,8 +144,11 @@ function logRoute(opts: {
 // ─── public API ──────────────────────────────────────────────────────────────
 
 export async function generateNode(title: string, ancestorPath: string): Promise<GenerateResponse> {
+  // taskType is inferred from ancestorPath: empty string means this is a
+  // root call (a brand-new session), anything else is an expansion.
+  // /api/generate must pass `''` for root — see route comment there.
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
-  const taskType = ancestorPath ? 'expand' : 'root'
+  const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
   const routeInput: RouteInput = { taskType, depth, historyLen: 0 }
   const initial = pickModel(routeInput)
 
@@ -102,10 +163,11 @@ Context: ${ancestorPath}
 Topic: ${title}`
 
   const start = Date.now()
-  const { value: parsed, choice } = await withRetry(initial, async (c) => {
+  const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
     const raw = await callProvider(c, {
       messages: [{ role: 'user', content: prompt }],
       maxTokens: MAX_TOKENS_GENERATE,
+      timeoutMs: REQUEST_TIMEOUT_MS,
     })
     return { parsed: parseJson<Partial<GenerateResponse>>(raw), raw }
   })
@@ -118,15 +180,15 @@ Topic: ${title}`
     historyLen: 0,
     latencyMs,
     inputChars: prompt.length,
-    outputChars: parsed.raw.length,
-    retried: choice.model !== initial.model,
+    outputChars: value.raw.length,
+    retried,
   })
 
   return {
-    description: parsed.parsed.description ?? '',
-    needsDiagram: parsed.parsed.needsDiagram ?? false,
-    children: Array.isArray(parsed.parsed.children)
-      ? (parsed.parsed.children as string[]).filter(c => typeof c === 'string')
+    description: value.parsed.description ?? '',
+    needsDiagram: value.parsed.needsDiagram ?? false,
+    children: Array.isArray(value.parsed.children)
+      ? (value.parsed.children as string[]).filter(c => typeof c === 'string')
       : [],
   }
 }
@@ -136,7 +198,7 @@ export async function answerQuestion(
   nodeDescription: string,
   ancestorPath: string,
   history: { role: 'user' | 'assistant'; content: string }[],
-  question: string
+  question: string,
 ): Promise<QAResponse> {
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
   const routeInput: RouteInput = { taskType: 'qa', depth, historyLen: history.length }
@@ -163,8 +225,13 @@ If no classifications apply, return an empty array and false for offerDiagram.`
   const inputChars = system.length + messages.reduce((n, m) => n + m.content.length, 0)
 
   const start = Date.now()
-  const { value: parsed, choice } = await withRetry(initial, async (c) => {
-    const raw = await callProvider(c, { system, messages, maxTokens: MAX_TOKENS_QA })
+  const { value, choice, retried } = await withRetry('qa', initial, async (c) => {
+    const raw = await callProvider(c, {
+      system,
+      messages,
+      maxTokens: MAX_TOKENS_QA,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    })
     return { parsed: parseJson<Partial<QAResponse>>(raw), raw }
   })
   const latencyMs = Date.now() - start
@@ -176,13 +243,13 @@ If no classifications apply, return an empty array and false for offerDiagram.`
     historyLen: history.length,
     latencyMs,
     inputChars,
-    outputChars: parsed.raw.length,
-    retried: choice.model !== initial.model,
+    outputChars: value.raw.length,
+    retried,
   })
 
   return {
-    answer: parsed.parsed.answer ?? '',
-    classifications: Array.isArray(parsed.parsed.classifications) ? parsed.parsed.classifications : [],
-    offerDiagram: parsed.parsed.offerDiagram ?? false,
+    answer: value.parsed.answer ?? '',
+    classifications: Array.isArray(value.parsed.classifications) ? value.parsed.classifications : [],
+    offerDiagram: value.parsed.offerDiagram ?? false,
   }
 }
