@@ -64,23 +64,38 @@ function computeLayout(nodes: NodeInfo[]): Map<string, { x: number; y: number }>
   return positions
 }
 
+function nodeData(
+  node: NodeInfo,
+  selectedNodeId: string | null,
+  expandingNodeIds: Set<string>,
+  collapsedNodeIds: Set<string>,
+  childCountByParent: Map<string, number>
+) {
+  const isCollapsed = collapsedNodeIds.has(node.id)
+  return {
+    label: node.label,
+    isRoot: node.parentId === null,
+    isSelected: node.id === selectedNodeId,
+    isStub: node.status === 'stub',
+    isExpanding: expandingNodeIds.has(node.id),
+    isCollapsed,
+    hiddenCount: isCollapsed ? (childCountByParent.get(node.id) ?? 0) : 0,
+  }
+}
+
 function buildFlowNodes(
   nodes: NodeInfo[],
   selectedNodeId: string | null,
-  expandingNodeIds: Set<string>
+  expandingNodeIds: Set<string>,
+  collapsedNodeIds: Set<string>,
+  childCountByParent: Map<string, number>
 ) {
   const positions = computeLayout(nodes)
   return nodes.map(node => ({
     id: node.id,
     type: 'topicNode',
     position: positions.get(node.id) ?? { x: 0, y: 0 },
-    data: {
-      label: node.label,
-      isRoot: node.parentId === null,
-      isSelected: node.id === selectedNodeId,
-      isStub: node.status === 'stub',
-      isExpanding: expandingNodeIds.has(node.id),
-    },
+    data: nodeData(node, selectedNodeId, expandingNodeIds, collapsedNodeIds, childCountByParent),
   }))
 }
 
@@ -89,11 +104,13 @@ function TopicNode({ data }: NodeProps) {
   const isSelected = data.isSelected as boolean
   const isStub = data.isStub as boolean
   const isExpanding = data.isExpanding as boolean
+  const isCollapsed = data.isCollapsed as boolean
+  const hiddenCount = data.hiddenCount as number
   const label = data.label as string
 
   return (
     <div
-      className={`px-4 py-3 rounded-xl border text-sm font-semibold w-[160px] text-center shadow-lg select-none cursor-pointer transition-all leading-snug ${
+      className={`relative px-4 py-3 rounded-xl border text-sm font-semibold w-[160px] text-center shadow-lg select-none cursor-pointer transition-all leading-snug ${
         isExpanding
           ? 'bg-slate-800 border-indigo-400 text-slate-300 animate-pulse'
           : isRoot
@@ -119,6 +136,11 @@ function TopicNode({ data }: NodeProps) {
         )
         : label
       }
+      {isCollapsed && (
+        <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-indigo-600 border border-indigo-400 text-white text-[10px] font-bold leading-none shadow">
+          +{hiddenCount}
+        </div>
+      )}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
   )
@@ -136,13 +158,16 @@ type Props = {
   onNodeClick: (node: NodeInfo) => void
   needsDiagram?: boolean
   expandingNodeIds?: Set<string>
+  collapsedNodeIds?: Set<string>
+  childCountByParent?: Map<string, number>
 }
 
 export default function DiagramCanvas({
-  nodes, edges, selectedNodeId, onNodeClick, needsDiagram = true, expandingNodeIds = new Set(),
+  nodes, edges, selectedNodeId, onNodeClick, needsDiagram = true,
+  expandingNodeIds = new Set(), collapsedNodeIds = new Set(), childCountByParent = new Map(),
 }: Props) {
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(
-    buildFlowNodes(nodes, selectedNodeId, expandingNodeIds)
+    buildFlowNodes(nodes, selectedNodeId, expandingNodeIds, collapsedNodeIds, childCountByParent)
   )
 
   // Track which node ids we've already laid out so re-renders don't reset
@@ -165,6 +190,7 @@ export default function DiagramCanvas({
         return prev.map(fn => {
           const src = byId.get(fn.id)
           if (!src) return fn
+          const isCollapsed = collapsedNodeIds.has(src.id)
           return {
             ...fn,
             data: {
@@ -172,6 +198,8 @@ export default function DiagramCanvas({
               label: src.label,
               isStub: src.status === 'stub',
               isExpanding: expandingNodeIds.has(src.id),
+              isCollapsed,
+              hiddenCount: isCollapsed ? (childCountByParent.get(src.id) ?? 0) : 0,
             },
           }
         })
@@ -188,20 +216,14 @@ export default function DiagramCanvas({
         id: node.id,
         type: 'topicNode',
         position: prevPosById.get(node.id) ?? positions.get(node.id) ?? { x: 0, y: 0 },
-        data: {
-          label: node.label,
-          isRoot: node.parentId === null,
-          isSelected: node.id === selectedNodeId,
-          isStub: node.status === 'stub',
-          isExpanding: expandingNodeIds.has(node.id),
-        },
+        data: nodeData(node, selectedNodeId, expandingNodeIds, collapsedNodeIds, childCountByParent),
       }))
     })
     knownIdsRef.current = currentIds
   // selectedNodeId is intentionally excluded; selection updates run in a
   // separate effect to avoid touching positions or data on every click.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, expandingNodeIds])
+  }, [nodes, expandingNodeIds, collapsedNodeIds, childCountByParent])
 
   useEffect(() => {
     setFlowNodes(prev =>

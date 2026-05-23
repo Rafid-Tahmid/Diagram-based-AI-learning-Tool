@@ -1,6 +1,8 @@
 import { answerQuestion } from '@/lib/ai'
+import { prisma } from '@/lib/db'
 
 type QABody = {
+  nodeId: string
   nodeTitle: string
   nodeDescription?: string
   ancestorPath: string
@@ -12,6 +14,7 @@ function validateBody(raw: unknown): QABody | null {
   if (typeof raw !== 'object' || raw === null) return null
   const b = raw as Record<string, unknown>
 
+  if (typeof b.nodeId !== 'string' || !b.nodeId) return null
   if (typeof b.nodeTitle !== 'string') return null
   if (typeof b.ancestorPath !== 'string') return null
   if (typeof b.question !== 'string' || !b.question.trim()) return null
@@ -26,11 +29,31 @@ function validateBody(raw: unknown): QABody | null {
   )
 
   return {
+    nodeId: b.nodeId,
     nodeTitle: b.nodeTitle,
     nodeDescription: typeof b.nodeDescription === 'string' ? b.nodeDescription : '',
     ancestorPath: b.ancestorPath,
     history,
     question: b.question,
+  }
+}
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url)
+  const nodeId = searchParams.get('nodeId')
+  if (!nodeId) {
+    return Response.json({ error: 'nodeId is required' }, { status: 400 })
+  }
+
+  try {
+    const rows = await prisma.qAMessage.findMany({
+      where: { nodeId },
+      orderBy: { createdAt: 'asc' },
+    })
+    return Response.json({ data: rows })
+  } catch (err) {
+    console.error('Failed to load QA thread:', err)
+    return Response.json({ error: 'Failed to load thread' }, { status: 500 })
   }
 }
 
@@ -48,6 +71,10 @@ export async function POST(request: Request) {
   }
 
   try {
+    await prisma.qAMessage.create({
+      data: { nodeId: body.nodeId, role: 'user', content: body.question },
+    })
+
     const data = await answerQuestion(
       body.nodeTitle,
       body.nodeDescription ?? '',
@@ -55,6 +82,16 @@ export async function POST(request: Request) {
       body.history,
       body.question
     )
+
+    await prisma.qAMessage.create({
+      data: {
+        nodeId: body.nodeId,
+        role: 'assistant',
+        content: data.answer,
+        diagram: data.classifications.length > 0 ? data.classifications : undefined,
+      },
+    })
+
     return Response.json({ data })
   } catch (err) {
     console.error('answerQuestion failed:', err)

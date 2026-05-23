@@ -233,12 +233,17 @@ dashed border and dimmer style. `NodePanel` shows spinner while expanding.
 - `prisma/schema.prisma` gains `@@index([parentId])` for child lookups — run
   `npx prisma db push` once to apply.
 
-### Phase 4.5 — Q&A Persistence (scope reduced — AI call already done in Phase 3)
+### Phase 4.5 — Q&A Persistence ✅ COMPLETE
 **Goal:** Persist Q&A threads to a `QAMessage` table per node so they survive page refresh.
 Switching to a different node and back restores that node's Q&A thread from the DB.
 The Ask-tab AI integration itself (calling `/api/qa`, context, history, inline diagram)
 is already complete from Phase 3 — only DB persistence remains.
 **Done when:** Ask a question on a node → refresh page → thread is still there.
+**Built:** `QAMessage` Prisma model (`nodeId`, `role`, `content`, `diagram Json?`). `GET /api/qa?nodeId`
+loads the thread; `POST /api/qa` now persists user and assistant messages before/after the AI call.
+`app/page.tsx` lazy-loads each node's thread from DB on first select (using `loadedThreadsRef` as a
+fetch-once guard); `nodeMessages` Map acts as the in-memory cache. `NodePanel` passes `nodeId` in
+the POST body. Historical messages load with classifications shown inline (no re-offer prompt).
 
 ### Phase 5 — Multi-Model Routing (not started)
 **Goal:** Route tasks to the right model based on complexity.
@@ -259,8 +264,8 @@ User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
 
 ## Current Phase
-**Phase 4 — complete**
-Next up: Phase 4.5 (Q&A persistence — DB only, AI call already done in Phase 3).
+**Phase 4.5 — complete**
+Next up: Phase 5 (multi-model routing).
 
 ## Key Decisions Log
 - React Flow chosen for diagram rendering (rich interactive features, good ecosystem)
@@ -296,3 +301,10 @@ Next up: Phase 4.5 (Q&A persistence — DB only, AI call already done in Phase 3
 - `/api/node` POST uses Prisma 5's extended `where` (`{ id, status: 'stub' }`) for an atomic stub→generated transition; the losing side of a race gets 409
 - `lib/ai.ts` `extractJson` falls back to slicing between the first `{` and last `}` when the model surrounds the JSON with prose; `firstTextBlock` scans for the first text block instead of indexing `content[0]` blindly
 - `prisma/schema.prisma` has `@@index([parentId])` because children-of-parent is a hot path; remember to `npx prisma db push` when the schema changes
+- Clicking a generated node with children toggles its subtree (collapse/expand); a `+N` badge shows the hidden direct-child count
+- Collapse is a client-side display filter (`collapsedNodes` Set + `visibleNodes`) over data already in state — re-expanding never calls the AI
+- Collapse state is in-memory only (not persisted) — on refresh the tree loads fully expanded
+- `QAMessage` persisted to DB: POST saves user + assistant messages; GET loads thread by nodeId ordered by createdAt
+- Threads are lazy-loaded on first node select via a `loadedThreadsRef` fetch-once guard; `nodeMessages` Map is the in-memory cache
+- Historical messages restored with `diagramAccepted: true` if `diagram` field present — no re-offer prompt for old threads
+- Dev server must restart after `prisma db push` — `globalThis.prisma` caches the old client instance across HMR

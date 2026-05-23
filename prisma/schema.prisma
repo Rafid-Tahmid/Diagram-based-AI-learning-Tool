@@ -8,15 +8,28 @@ datasource db {
 }
 
 model Node {
-  id          String   @id @default(uuid())
+  id          String      @id @default(uuid())
   sessionId   String
   parentId    String?
   title       String
   description String?
-  hasDiagram  Boolean  @default(false)
-  status      String   @default("stub")
-  createdAt   DateTime @default(now())
+  hasDiagram  Boolean     @default(false)
+  status      String      @default("stub")
+  createdAt   DateTime    @default(now())
+  qaMessages  QAMessage[]
 
   @@index([sessionId])
   @@index([parentId])
+}
+
+model QAMessage {
+  id        String   @id @default(uuid())
+  nodeId    String
+  role      String
+  content   String
+  diagram   Json?
+  createdAt DateTime @default(now())
+  node      Node     @relation(fields: [nodeId], references: [id])
+
+  @@index([nodeId])
 }

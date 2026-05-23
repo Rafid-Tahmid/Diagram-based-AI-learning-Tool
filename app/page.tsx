@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import DiagramCanvas from '@/components/DiagramCanvas'
 import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
-import type { NodeInfo, Message, DbNode } from '@/lib/types'
+import type { NodeInfo, Message, DbNode, QAClassification } from '@/lib/types'
 
 const SESSION_KEY = 'diagram-learning-session'
 
@@ -16,6 +16,28 @@ function dbNodeToInfo(n: DbNode): NodeInfo {
     status: n.status as 'stub' | 'generated',
     parentId: n.parentId,
     hasDiagram: n.hasDiagram,
+  }
+}
+
+type DbQAMessage = {
+  id: string
+  nodeId: string
+  role: string
+  content: string
+  diagram: unknown
+  createdAt: string
+}
+
+function dbMsgToMessage(row: DbQAMessage): Message {
+  const classifications =
+    Array.isArray(row.diagram) ? (row.diagram as QAClassification[]) : undefined
+  return {
+    id: row.id,
+    role: row.role as 'user' | 'assistant',
+    content: row.content,
+    classifications,
+    offerDiagram: false,
+    diagramAccepted: classifications !== undefined ? true : undefined,
   }
 }
 
@@ -97,6 +119,8 @@ export default function Home() {
   const [nodePath, setNodePath] = useState<NodeInfo[]>([])
   const [nodeMessages, setNodeMessages] = useState<Map<string, Message[]>>(new Map())
   const [expandingNodes, setExpandingNodes] = useState<Set<string>>(new Set())
+  const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set())
+  const loadedThreadsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     let cancelled = false
@@ -132,12 +156,51 @@ export default function Home() {
     return () => { cancelled = true }
   }, [])
 
+  useEffect(() => {
+    if (!selectedNode || loadedThreadsRef.current.has(selectedNode.id)) return
+    const nodeId = selectedNode.id
+    loadedThreadsRef.current.add(nodeId)
+    fetch(`/api/qa?nodeId=${encodeURIComponent(nodeId)}`)
+      .then(res => res.json())
+      .then((json: unknown) => {
+        if (!json || typeof json !== 'object' || !('data' in json)) return
+        const rows = (json as { data: DbQAMessage[] }).data
+        if (rows.length === 0) return
+        setNodeMessages(prev => new Map(prev).set(nodeId, rows.map(dbMsgToMessage)))
+      })
+      .catch(() => {})
+  }, [selectedNode])
+
+  const childCountByParent = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const n of nodes) {
+      if (n.parentId) m.set(n.parentId, (m.get(n.parentId) ?? 0) + 1)
+    }
+    return m
+  }, [nodes])
+
+  // A node is hidden when any of its ancestors is collapsed. The collapsed
+  // node itself stays visible (so you can click it again to re-expand).
+  const visibleNodes = useMemo(() => {
+    if (collapsedNodes.size === 0) return nodes
+    const byId = new Map(nodes.map(n => [n.id, n]))
+    const hiddenByAncestor = (n: NodeInfo): boolean => {
+      let p = n.parentId ? byId.get(n.parentId) : undefined
+      while (p) {
+        if (collapsedNodes.has(p.id)) return true
+        p = p.parentId ? byId.get(p.parentId) : undefined
+      }
+      return false
+    }
+    return nodes.filter(n => !hiddenByAncestor(n))
+  }, [nodes, collapsedNodes])
+
   const edges = useMemo(
     () =>
-      nodes
+      visibleNodes
         .filter(n => n.parentId !== null)
         .map(n => ({ id: `e-${n.parentId}-${n.id}`, source: n.parentId!, target: n.id })),
-    [nodes]
+    [visibleNodes]
   )
 
   const rootNeedsDiagram = useMemo(() => {
@@ -155,6 +218,7 @@ export default function Home() {
     setSelectedNode(null)
     setNodePath([])
     setNodeMessages(new Map())
+    loadedThreadsRef.current = new Set()
 
     try {
       const { sessionId, nodes: dbNodes } = await fetchGenerate(topic)
@@ -177,7 +241,22 @@ export default function Home() {
     setSelectedNode(node)
     setNodePath(buildPath(node.id, nodes))
 
-    if (node.status !== 'stub' || expandingNodes.has(node.id)) return
+    // Already-generated node with children: toggle its subtree visibility.
+    // Children are already in state/DB, so re-expanding never calls the AI.
+    if (node.status !== 'stub') {
+      const hasChildren = nodes.some(n => n.parentId === node.id)
+      if (hasChildren) {
+        setCollapsedNodes(prev => {
+          const next = new Set(prev)
+          if (next.has(node.id)) next.delete(node.id)
+          else next.add(node.id)
+          return next
+        })
+      }
+      return
+    }
+
+    if (expandingNodes.has(node.id)) return
 
     setExpandingNodes(prev => new Set(prev).add(node.id))
     try {
@@ -287,12 +366,14 @@ export default function Home() {
             )}
             {nodes.length > 0 && (
               <DiagramCanvas
-                nodes={nodes}
+                nodes={visibleNodes}
                 edges={edges}
                 selectedNodeId={selectedNode?.id ?? null}
                 onNodeClick={handleNodeClick}
                 needsDiagram={rootNeedsDiagram}
                 expandingNodeIds={expandingNodes}
+                collapsedNodeIds={collapsedNodes}
+                childCountByParent={childCountByParent}
               />
             )}
           </div>

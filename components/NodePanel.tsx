@@ -17,6 +17,7 @@ type Props = {
 
 async function fetchAnswer(
   body: {
+    nodeId: string
     nodeTitle: string
     nodeDescription: string
     ancestorPath: string
@@ -85,6 +86,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
     try {
       const data = await fetchAnswer(
         {
+          nodeId: node.id,
           nodeTitle: node.label,
           nodeDescription: node.description ?? '',
           ancestorPath,
