@@ -15,7 +15,7 @@ function validateBody(raw: unknown): QABody | null {
   const b = raw as Record<string, unknown>
 
   if (typeof b.nodeId !== 'string' || !b.nodeId) return null
-  if (typeof b.nodeTitle !== 'string') return null
+  if (typeof b.nodeTitle !== 'string' || !b.nodeTitle.trim()) return null
   if (typeof b.ancestorPath !== 'string') return null
   if (typeof b.question !== 'string' || !b.question.trim()) return null
   if (!Array.isArray(b.history)) return null
@@ -48,7 +48,9 @@ export async function GET(request: Request) {
   try {
     const rows = await prisma.qAMessage.findMany({
       where: { nodeId },
-      orderBy: { createdAt: 'asc' },
+      // id tiebreaker so two messages saved in the same transaction (user +
+      // assistant) come back in a deterministic order.
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
     return Response.json({ data: rows })
   } catch (err) {
@@ -70,13 +72,11 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Invalid request body' }, { status: 400 })
   }
 
-  let userMsg: { id: string } | null = null
   try {
-    userMsg = await prisma.qAMessage.create({
-      data: { nodeId: body.nodeId, role: 'user', content: body.question },
-      select: { id: true },
-    })
-
+    // Call the AI first. If it throws (or returns malformed JSON) we
+    // haven't written anything yet, so there's no orphan to clean up.
+    // The user is shown their own message immediately from local state,
+    // so the small delay before the DB row exists is invisible.
     const data = await answerQuestion(
       body.nodeTitle,
       body.nodeDescription ?? '',
@@ -85,22 +85,27 @@ export async function POST(request: Request) {
       body.question
     )
 
-    await prisma.qAMessage.create({
-      data: {
-        nodeId: body.nodeId,
-        role: 'assistant',
-        content: data.answer,
-        diagram: data.classifications.length > 0 ? data.classifications : undefined,
-      },
-    })
+    // Persist user + assistant atomically — half-written threads on a
+    // transient DB error are impossible.
+    await prisma.$transaction([
+      prisma.qAMessage.create({
+        data: { nodeId: body.nodeId, role: 'user', content: body.question },
+      }),
+      prisma.qAMessage.create({
+        data: {
+          nodeId: body.nodeId,
+          role: 'assistant',
+          content: data.answer,
+          // Prisma treats `undefined` as "skip this field" which leaves the
+          // nullable Json column as SQL NULL. Plain `null` requires the
+          // `Prisma.JsonNull` sentinel for the Json type.
+          diagram: data.classifications.length > 0 ? data.classifications : undefined,
+        },
+      }),
+    ])
 
     return Response.json({ data })
   } catch (err) {
-    // Remove the orphaned user message so a failed Q&A doesn't leave a
-    // question in the DB with no answer.
-    if (userMsg) {
-      await prisma.qAMessage.delete({ where: { id: userMsg.id } }).catch(() => {})
-    }
     console.error('answerQuestion failed:', err)
     const message = err instanceof Error ? err.message : 'Q&A failed'
     return Response.json({ error: message }, { status: 500 })

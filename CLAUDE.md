@@ -298,9 +298,17 @@ Next up: Phase 5 (multi-model routing).
 - Session-restore effect always funnels through an async `.finally()` for `setSessionLoading(false)` — React 19's `react-hooks/set-state-in-effect` rule rejects synchronous setState in the effect body
 - `fetchSession` throws a typed `SessionMissingError` on 404; only that case wipes `localStorage` — transient errors surface in the error banner instead of silently destroying the session
 - `/api/generate` writes root + stub children in a single `prisma.$transaction` so a partial failure can't orphan a root node; topics are capped at 200 chars
-- `/api/node` POST uses Prisma 5's extended `where` (`{ id, status: 'stub' }`) for an atomic stub→generated transition; the losing side of a race gets 409
-- `lib/ai.ts` `extractJson` falls back to slicing between the first `{` and last `}` when the model surrounds the JSON with prose; `firstTextBlock` scans for the first text block instead of indexing `content[0]` blindly
+- `/api/node` POST runs the stub→generated update, child createMany, and child reload all inside a single `prisma.$transaction(async tx => ...)`; a `StubAlreadyGenerated` sentinel translates Prisma's P2025 race error to a 409 at the handler boundary
+- `/api/qa` POST calls the AI first and only persists both messages on success, inside a single `prisma.$transaction([...])` — removes the orphan-then-cleanup pattern that could silently leave half-written threads when the cleanup itself failed
+- `lib/ai.ts` `extractJson` falls back to slicing between the first `{` and last `}` when the model surrounds the JSON with prose; `firstTextBlock` THROWS on a missing text block (the old `'{}'` default silently produced empty nodes)
+- `lib/ai.ts` uses separate `MAX_TOKENS_GENERATE` (1024) and `MAX_TOKENS_QA` (2048) — Q&A answers + classifications occasionally truncated mid-JSON on a shared 1024 cap
 - `prisma/schema.prisma` has `@@index([parentId])` because children-of-parent is a hot path; remember to `npx prisma db push` when the schema changes
+- DB queries sort by `[createdAt asc, id asc]` — `createMany` writes siblings with identical ms-precision timestamps, so without the id tiebreaker layout shuffled between refreshes
+- `page.tsx` has a `sessionVersionRef` bumped on every new-topic submit; all async handlers capture the version at start and drop late results so a stale expansion can't drop orphans into a new session
+- `page.tsx` has an `expandingRef` mirroring `expandingNodes` purely for synchronous read-then-write guarding; the React state version wasn't flushed quickly enough for double-clicks
+- Historical Q&A loader skips the write when `nodeMessages` already has a bucket for the nodeId — local conversation state wins over the DB snapshot to avoid clobbering live `offerDiagram` / `diagramAccepted` flags
+- NodePanel doesn't abort in-flight Q&A on unmount — aborting on node switch caused the assistant reply to be discarded locally while the server still saved both messages, hiding the answer until refresh
+- Error replies are tagged `isError` and filtered out of the history sent to the AI so the model doesn't echo its own apology on the next turn
 - Clicking a generated node with children toggles its subtree (collapse/expand); a `+N` badge shows the hidden direct-child count
 - Collapse is a client-side display filter (`collapsedNodes` Set + `visibleNodes`) over data already in state — re-expanding never calls the AI
 - Collapse state is in-memory only (not persisted) — on refresh the tree loads fully expanded
@@ -311,5 +319,55 @@ Next up: Phase 5 (multi-model routing).
 
 **Post-Phase-4.5 hardening / bug-fix pass:**
 - `diagramAccepted` is NOT restored on reload — we can't distinguish accepted vs declined from DB; classifications render as info cards only, no auto-diagram
-- Orphaned user messages are cleaned up on AI failure — POST saves the user message first, then deletes it if `answerQuestion` throws, keeping the thread consistent
 - `collapsedNodes` is now reset in `handleSubmit` alongside `nodes`, `nodeMessages`, and `loadedThreadsRef` — prevents stale IDs from a prior session lingering in the Set
+
+**Post-Phase-4.5 race / integrity pass:**
+- NodePanel no longer aborts in-flight Q&A on unmount. Aborting on node switch
+  caused the server to save both messages while the client discarded the
+  assistant reply, making the answer invisible until refresh. A `mountedRef`
+  now gates the typing-indicator clear; the parent's per-node message bucket
+  receives the write regardless of which panel is currently mounted.
+- `page.tsx` carries a `sessionVersionRef` bumped on every new-topic submit.
+  `handleSubmit`, `handleNodeClick`, and the historical Q&A loader capture
+  the version at start and bail out if it changed before they commit, so a
+  stale expansion can't drop orphan children into a new session, and a stale
+  thread fetch can't write into a different session's `nodeMessages` map.
+- `expandingRef` mirrors `expandingNodes` for a synchronous read-then-write
+  guard against double-click races (the React state version wasn't flushed
+  by the time the second click's handler read it, so both fired and one
+  surfaced a 409 in the red banner).
+- Historical Q&A loader no longer overwrites a thread that the live
+  conversation has already populated — local state wins when both exist,
+  so freshly-set `offerDiagram` / `diagramAccepted` flags survive even if
+  the GET resolves after the POST.
+- Error replies in the Q&A panel are tagged `isError` and filtered out of
+  the history array sent to the AI, so the model doesn't see its own
+  "Sorry, I couldn't answer that…" apology as a real previous turn.
+- Ask input is disabled while the selected node is being expanded
+  (`isExpanding=true`) — prevents sending a question with an empty
+  `nodeDescription`, which would give the AI no grounding context.
+- `/api/node` POST is now fully transactional. The stub→generated update,
+  child stub creation, and child reload all run inside one
+  `prisma.$transaction(async tx => ...)`. A failure between the update and
+  the createMany previously left the parent marked `generated` but with no
+  children — the node became un-expandable (re-click returned 400). The
+  P2025 race case is propagated out via a typed `StubAlreadyGenerated`
+  sentinel and translated to 409 by the outer handler.
+- `/api/qa` POST inverts the orphan-cleanup pattern. The AI call now runs
+  first; only on success do we persist both user + assistant messages in
+  a single `prisma.$transaction([...])`. Removes the silent-failure path
+  where the orphan-delete itself fails and the cleanup is swallowed by
+  `.catch(() => {})`. User still sees their message immediately because
+  it's already in local state.
+- All DB reads add `id` as a tiebreaker to `orderBy: [{ createdAt }, { id }]`.
+  `createMany` writes sibling stubs with identical ms-precision `createdAt`,
+  so without the tiebreaker layout shifted between refreshes.
+- `lib/ai.ts` `firstTextBlock` throws instead of returning `'{}'`. The
+  silent default produced an empty generated node with no children and no
+  description — failure looked like success.
+- `MAX_TOKENS` split into `MAX_TOKENS_GENERATE` (1024) and `MAX_TOKENS_QA`
+  (2048). Q&A answers + classifications occasionally truncated mid-JSON
+  on the shared 1024 cap.
+- `/api/qa` POST rejects empty `nodeTitle` (was previously only checked
+  for type, not content).
+- `dbMsgToMessage` narrows `row.role` defensively rather than casting.

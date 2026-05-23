@@ -57,7 +57,9 @@ export async function POST(request: Request) {
 
       return tx.node.findMany({
         where: { sessionId },
-        orderBy: { createdAt: 'asc' },
+        // Stub siblings share createdAt to ms precision; id as tiebreaker
+        // keeps layout deterministic across refreshes.
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       })
     })
 

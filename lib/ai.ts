@@ -2,7 +2,12 @@ import Anthropic from '@anthropic-ai/sdk'
 import type { GenerateResponse, QAResponse } from '@/lib/types'
 
 const MODEL = 'claude-sonnet-4-6'
-const MAX_TOKENS = 1024
+// Generate is small and structured (description + a few title strings);
+// 1024 has comfortable headroom. Q&A can include classifications on top
+// of a 1-3 sentence answer, and we'd rather risk a few extra tokens than
+// a mid-JSON truncation that fails parsing.
+const MAX_TOKENS_GENERATE = 1024
+const MAX_TOKENS_QA = 2048
 
 if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('ANTHROPIC_API_KEY is not set. Add it to .env.local.')
@@ -34,13 +39,16 @@ function firstTextBlock(content: Anthropic.ContentBlock[]): string {
   for (const block of content) {
     if (block.type === 'text') return block.text
   }
-  return '{}'
+  // Previously returned '{}' which silently produced a fully-defaulted
+  // response (empty description, no children). Throwing surfaces the real
+  // failure mode — usually a tool_use-only response or an empty stream.
+  throw new Error('Model response contained no text block')
 }
 
 export async function generateNode(title: string, ancestorPath: string): Promise<GenerateResponse> {
   const message = await client.messages.create({
     model: MODEL,
-    max_tokens: MAX_TOKENS,
+    max_tokens: MAX_TOKENS_GENERATE,
     messages: [
       {
         role: 'user',
@@ -90,7 +98,7 @@ If no classifications apply, return an empty array and false for offerDiagram.`
 
   const message = await client.messages.create({
     model: MODEL,
-    max_tokens: MAX_TOKENS,
+    max_tokens: MAX_TOKENS_QA,
     system: systemPrompt,
     messages: [
       ...history.map(h => ({ role: h.role, content: h.content })),
