@@ -1,40 +1,58 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import DiagramCanvas from '@/components/DiagramCanvas'
 import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
-import type { NodeInfo, Message, GenerateResponse } from '@/lib/types'
+import type { NodeInfo, Message, DbNode } from '@/lib/types'
 
-type DiagramState = {
-  nodes: NodeInfo[]
-  edges: { id: string; source: string; target: string }[]
-  needsDiagram: boolean
-}
+const SESSION_KEY = 'diagram-learning-session'
 
-function buildDiagram(topic: string, data: GenerateResponse): DiagramState {
-  const root: NodeInfo = { id: 'root', label: topic, description: data.description }
-
-  if (!data.needsDiagram || data.children.length === 0) {
-    return { nodes: [root], edges: [], needsDiagram: false }
+function dbNodeToInfo(n: DbNode): NodeInfo {
+  return {
+    id: n.id,
+    label: n.title,
+    description: n.description ?? undefined,
+    status: n.status as 'stub' | 'generated',
+    parentId: n.parentId,
+    hasDiagram: n.hasDiagram,
   }
-
-  const children = data.children.map((c, i) => ({
-    id: `child-${i}`,
-    label: c.title,
-    description: c.description,
-  }))
-  const edges = children.map((c, i) => ({ id: `e-root-${i}`, source: 'root', target: c.id }))
-  return { nodes: [root, ...children], edges, needsDiagram: true }
 }
 
-async function fetchGenerate(topic: string): Promise<GenerateResponse> {
+function buildPath(targetId: string, allNodes: NodeInfo[]): NodeInfo[] {
+  const nodeMap = new Map(allNodes.map(n => [n.id, n]))
+  const path: NodeInfo[] = []
+  let current = nodeMap.get(targetId)
+  while (current) {
+    path.unshift(current)
+    current = current.parentId ? nodeMap.get(current.parentId) : undefined
+  }
+  return path
+}
+
+class SessionMissingError extends Error {
+  constructor() {
+    super('Session not found')
+    this.name = 'SessionMissingError'
+  }
+}
+
+async function fetchSession(sessionId: string): Promise<DbNode[]> {
+  const res = await fetch(`/api/node?sessionId=${encodeURIComponent(sessionId)}`)
+  if (res.status === 404) throw new SessionMissingError()
+  const json: unknown = await res.json().catch(() => null)
+  if (!res.ok || !json || typeof json !== 'object' || !('data' in json)) {
+    throw new Error('Failed to load session')
+  }
+  return (json as { data: DbNode[] }).data
+}
+
+async function fetchGenerate(topic: string): Promise<{ sessionId: string; nodes: DbNode[] }> {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic }),
   })
-
   const json: unknown = await res.json().catch(() => null)
   if (!res.ok) {
     const errMsg =
@@ -46,17 +64,86 @@ async function fetchGenerate(topic: string): Promise<GenerateResponse> {
   if (!json || typeof json !== 'object' || !('data' in json)) {
     throw new Error('Malformed response from server')
   }
-  return (json as { data: GenerateResponse }).data
+  return (json as { data: { sessionId: string; nodes: DbNode[] } }).data
+}
+
+async function fetchExpandNode(nodeId: string): Promise<{ node: DbNode; children: DbNode[] }> {
+  const res = await fetch('/api/node', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodeId }),
+  })
+  const json: unknown = await res.json().catch(() => null)
+  if (!res.ok) {
+    const errMsg =
+      json && typeof json === 'object' && 'error' in json && typeof (json as { error: unknown }).error === 'string'
+        ? (json as { error: string }).error
+        : `Request failed (${res.status})`
+    throw new Error(errMsg)
+  }
+  if (!json || typeof json !== 'object' || !('data' in json)) {
+    throw new Error('Malformed response from server')
+  }
+  return (json as { data: { node: DbNode; children: DbNode[] } }).data
 }
 
 export default function Home() {
   const [inputValue, setInputValue] = useState('')
-  const [diagram, setDiagram] = useState<DiagramState | null>(null)
+  const [nodes, setNodes] = useState<NodeInfo[]>([])
   const [loading, setLoading] = useState(false)
+  const [sessionLoading, setSessionLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<NodeInfo | null>(null)
   const [nodePath, setNodePath] = useState<NodeInfo[]>([])
   const [nodeMessages, setNodeMessages] = useState<Map<string, Message[]>>(new Map())
+  const [expandingNodes, setExpandingNodes] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    let cancelled = false
+    const savedId = localStorage.getItem(SESSION_KEY)
+    const work: Promise<void> = savedId
+      ? fetchSession(savedId)
+          .then(dbNodes => {
+            if (cancelled) return
+            const infos = dbNodes.map(dbNodeToInfo)
+            setNodes(infos)
+            const root = infos.find(n => n.parentId === null)
+            if (root) {
+              setSelectedNode(root)
+              setNodePath([root])
+            }
+          })
+          .catch(err => {
+            if (cancelled) return
+            // Only clear the saved id when the server truly doesn't have it;
+            // transient network/DB errors should not destroy the user's session.
+            if (err instanceof SessionMissingError) {
+              localStorage.removeItem(SESSION_KEY)
+            } else {
+              setError(err instanceof Error ? err.message : 'Failed to restore previous session')
+            }
+          })
+      : Promise.resolve()
+
+    work.finally(() => {
+      if (!cancelled) setSessionLoading(false)
+    })
+
+    return () => { cancelled = true }
+  }, [])
+
+  const edges = useMemo(
+    () =>
+      nodes
+        .filter(n => n.parentId !== null)
+        .map(n => ({ id: `e-${n.parentId}-${n.id}`, source: n.parentId!, target: n.id })),
+    [nodes]
+  )
+
+  const rootNeedsDiagram = useMemo(() => {
+    const root = nodes.find(n => n.parentId === null)
+    return root ? root.hasDiagram : true
+  }, [nodes])
 
   const handleSubmit = useCallback(async () => {
     const topic = inputValue.trim()
@@ -64,18 +151,21 @@ export default function Home() {
 
     setLoading(true)
     setError(null)
-    setDiagram(null)
+    setNodes([])
     setSelectedNode(null)
     setNodePath([])
     setNodeMessages(new Map())
 
     try {
-      const data = await fetchGenerate(topic)
-      const built = buildDiagram(topic, data)
-      const root = built.nodes[0]
-      setDiagram(built)
-      setSelectedNode(root)
-      setNodePath([root])
+      const { sessionId, nodes: dbNodes } = await fetchGenerate(topic)
+      localStorage.setItem(SESSION_KEY, sessionId)
+      const infos = dbNodes.map(dbNodeToInfo)
+      setNodes(infos)
+      const root = infos.find(n => n.parentId === null)
+      if (root) {
+        setSelectedNode(root)
+        setNodePath([root])
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -83,12 +173,33 @@ export default function Home() {
     }
   }, [inputValue, loading])
 
-  const handleNodeClick = useCallback((node: NodeInfo) => {
-    if (!diagram) return
-    const root = diagram.nodes[0]
-    setNodePath(node.id === 'root' ? [node] : [root, node])
+  const handleNodeClick = useCallback(async (node: NodeInfo) => {
     setSelectedNode(node)
-  }, [diagram])
+    setNodePath(buildPath(node.id, nodes))
+
+    if (node.status !== 'stub' || expandingNodes.has(node.id)) return
+
+    setExpandingNodes(prev => new Set(prev).add(node.id))
+    try {
+      const { node: updatedDb, children } = await fetchExpandNode(node.id)
+      const updatedInfo = dbNodeToInfo(updatedDb)
+      const childInfos = children.map(dbNodeToInfo)
+
+      setNodes(prev => [...prev.map(n => n.id === node.id ? updatedInfo : n), ...childInfos])
+      // Only refresh selection/path if the user is still looking at the same node.
+      // Otherwise a late-arriving expansion would clobber their new selection.
+      setSelectedNode(current => current?.id === node.id ? updatedInfo : current)
+      setNodePath(prev => prev.map(n => n.id === node.id ? updatedInfo : n))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Generation failed')
+    } finally {
+      setExpandingNodes(prev => {
+        const next = new Set(prev)
+        next.delete(node.id)
+        return next
+      })
+    }
+  }, [nodes, expandingNodes])
 
   const handleBreadcrumbNavigate = useCallback((node: NodeInfo, index: number) => {
     setNodePath(prev => prev.slice(0, index + 1))
@@ -103,6 +214,14 @@ export default function Home() {
   const handleMessagesChange = useCallback((nodeId: string, messages: Message[]) => {
     setNodeMessages(prev => new Map(prev).set(nodeId, messages))
   }, [])
+
+  if (sessionLoading) {
+    return (
+      <main className="flex items-center justify-center h-screen bg-slate-950">
+        <div className="w-4 h-4 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+      </main>
+    )
+  }
 
   return (
     <main className="flex flex-col h-screen bg-slate-950">
@@ -155,7 +274,7 @@ export default function Home() {
           )}
 
           <div className="flex-1 min-h-0">
-            {!diagram && !loading && !error && (
+            {nodes.length === 0 && !loading && !error && (
               <div className="flex items-center justify-center h-full">
                 <p className="text-slate-600 text-sm">Type a topic above to get started.</p>
               </div>
@@ -166,13 +285,14 @@ export default function Home() {
                 <p className="text-slate-400 text-sm">Generating…</p>
               </div>
             )}
-            {diagram && (
+            {nodes.length > 0 && (
               <DiagramCanvas
-                nodes={diagram.nodes}
-                edges={diagram.edges}
+                nodes={nodes}
+                edges={edges}
                 selectedNodeId={selectedNode?.id ?? null}
                 onNodeClick={handleNodeClick}
-                needsDiagram={diagram.needsDiagram}
+                needsDiagram={rootNeedsDiagram}
+                expandingNodeIds={expandingNodes}
               />
             )}
           </div>
@@ -186,6 +306,7 @@ export default function Home() {
             messages={nodeMessages.get(selectedNode.id) ?? []}
             onMessagesChange={msgs => handleMessagesChange(selectedNode.id, msgs)}
             ancestorPath={nodePath.map(n => n.label).join(' > ')}
+            isExpanding={expandingNodes.has(selectedNode.id)}
           />
         )}
       </div>

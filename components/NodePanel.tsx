@@ -12,6 +12,7 @@ type Props = {
   messages: Message[]
   onMessagesChange: (messages: Message[]) => void
   ancestorPath: string
+  isExpanding: boolean
 }
 
 async function fetchAnswer(
@@ -45,7 +46,7 @@ async function fetchAnswer(
   return (json as { data: QAResponse }).data
 }
 
-export default function NodePanel({ node, onClose, messages, onMessagesChange, ancestorPath }: Props) {
+export default function NodePanel({ node, onClose, messages, onMessagesChange, ancestorPath, isExpanding }: Props) {
   const [activeTab, setActiveTab] = useState<'description' | 'ask'>('description')
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
@@ -158,11 +159,16 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
 
       {activeTab === 'description' && (
         <div className="flex-1 overflow-y-auto px-5 py-5">
-          {node.description ? (
+          {isExpanding ? (
+            <div className="flex items-center gap-2 text-slate-400">
+              <div className="w-4 h-4 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin shrink-0" />
+              <p className="text-sm">Generating content…</p>
+            </div>
+          ) : node.description ? (
             <p className="text-slate-300 text-sm leading-relaxed">{node.description}</p>
           ) : (
             <p className="text-slate-500 text-sm leading-relaxed italic">
-              Content for this node will be generated when you expand it — coming in the next phase.
+              Click this node to generate its content.
             </p>
           )}
         </div>

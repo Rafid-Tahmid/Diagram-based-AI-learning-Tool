@@ -1,4 +1,7 @@
-import { generateRootNode } from '@/lib/ai'
+import { generateNode } from '@/lib/ai'
+import { prisma } from '@/lib/db'
+
+const MAX_TOPIC_LENGTH = 200
 
 export async function POST(request: Request) {
   let body: unknown
@@ -8,20 +11,59 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const topic =
+  const rawTopic =
     typeof body === 'object' && body !== null && typeof (body as { topic?: unknown }).topic === 'string'
       ? (body as { topic: string }).topic.trim()
       : ''
 
-  if (!topic) {
+  if (!rawTopic) {
     return Response.json({ error: 'Topic is required' }, { status: 400 })
+  }
+  if (rawTopic.length > MAX_TOPIC_LENGTH) {
+    return Response.json(
+      { error: `Topic is too long (max ${MAX_TOPIC_LENGTH} characters)` },
+      { status: 400 }
+    )
   }
 
   try {
-    const data = await generateRootNode(topic)
-    return Response.json({ data })
+    const sessionId = crypto.randomUUID()
+    const data = await generateNode(rawTopic, rawTopic)
+
+    const nodes = await prisma.$transaction(async tx => {
+      const root = await tx.node.create({
+        data: {
+          sessionId,
+          parentId: null,
+          title: rawTopic,
+          description: data.description,
+          hasDiagram: data.needsDiagram,
+          status: 'generated',
+        },
+      })
+
+      if (data.needsDiagram && data.children.length > 0) {
+        await tx.node.createMany({
+          data: data.children.map(title => ({
+            sessionId,
+            parentId: root.id,
+            title,
+            description: null,
+            hasDiagram: false,
+            status: 'stub',
+          })),
+        })
+      }
+
+      return tx.node.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: 'asc' },
+      })
+    })
+
+    return Response.json({ data: { sessionId, nodes } })
   } catch (err) {
-    console.error('generateRootNode failed:', err)
+    console.error('generateNode failed:', err)
     const message = err instanceof Error ? err.message : 'Generation failed'
     return Response.json({ error: message }, { status: 500 })
   }

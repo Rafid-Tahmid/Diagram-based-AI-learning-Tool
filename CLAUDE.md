@@ -185,12 +185,53 @@ each thread. `Message` type moved to `lib/types.ts`.
   eliminate the initial white flash
 - Response body shapes validated on the client (no more blind `as` casts)
 
-### Phase 4 — Lazy Generation + Persistence (not started)
+### Phase 4 — Lazy Generation + Persistence ✅ COMPLETE
 **Goal:** Clicking any node calls the AI to generate its content on demand.
 All generated nodes are saved to PostgreSQL via Prisma. Refreshing the page
 restores the explored tree without regenerating anything.
 **Done when:** Click node → loading spinner → content appears → refresh → content still there.
 **Do NOT build:** Q&A persistence yet (that's Phase 4.5).
+**Built:** Docker Postgres + Prisma 5 schema (`Node` model with sessionId, parentId, status).
+`lib/db.ts` singleton client. `generateNode(title, ancestorPath)` replaces `generateRootNode` —
+children returned as title strings only (stubs). `/api/generate` creates session + saves root +
+stubs to DB, returns `{ sessionId, nodes }`. `/api/node` GET loads session; POST expands a stub
+node (generates description + stub grandchildren). `app/page.tsx` stores sessionId in localStorage,
+loads session on mount, triggers lazy expansion on stub click with per-node loading state.
+`DiagramCanvas` uses recursive subtree-width layout for arbitrary depth; stub nodes rendered with
+dashed border and dimmer style. `NodePanel` shows spinner while expanding.
+
+**Post-Phase-4 hardening / bug-fix pass:**
+- Fixed selection race: a late-arriving expansion no longer clobbers the user's
+  current selection (`handleNodeClick` now refreshes `selectedNode` only if
+  `current?.id === node.id`).
+- Fixed React-Flow position reset: dragged node positions now survive
+  expand/collapse cycles. `DiagramCanvas` tracks the set of known node ids in
+  a ref; existing nodes keep their current position, and only freshly-added
+  nodes get a layout-computed starting position. A separate effect patches
+  `data.isExpanding`/`label`/`status` in place when the node set hasn't changed.
+- Fixed React 19 lint error: the session-restore effect no longer calls
+  `setSessionLoading(false)` synchronously in the effect body — both branches
+  funnel through a single async `.finally()`.
+- Stopped destroying sessions on transient errors: `fetchSession` throws a
+  typed `SessionMissingError` on a 404, and `localStorage.removeItem` only
+  runs in that case (other errors surface in the red banner).
+- `NodeInfo` now carries `hasDiagram`, and the "self-contained — no sub-diagram
+  needed" hint is driven by `root.hasDiagram` instead of the `nodes.length > 1`
+  proxy.
+- `/api/generate` is now transactional (`prisma.$transaction`) — root + stub
+  children are written atomically, no redundant `findFirst`, and topics are
+  capped at 200 chars before they ever reach the LLM.
+- `/api/node` POST does an atomic stub → generated update (`where: { id, status:
+  'stub' }`) so two simultaneous expand calls for the same node can't both win
+  and double-create children. The losing request returns 409. GET returns 404
+  when no session rows exist (so the client can distinguish "wrong id" from
+  "DB down").
+- `lib/ai.ts`: `extractJson` now falls back to a `{ … }` slice when the model
+  returns prose around the JSON, and `firstTextBlock` safely scans for the
+  first text block instead of indexing `content[0]` blindly.
+- `lib/db.ts` uses `globalThis` (cross-runtime safe) instead of `global`.
+- `prisma/schema.prisma` gains `@@index([parentId])` for child lookups — run
+  `npx prisma db push` once to apply.
 
 ### Phase 4.5 — Q&A Persistence (scope reduced — AI call already done in Phase 3)
 **Goal:** Persist Q&A threads to a `QAMessage` table per node so they survive page refresh.
@@ -218,9 +259,8 @@ User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
 
 ## Current Phase
-**Phase 3 — complete (with post-phase hardening pass)**
-Next up: Phase 4 (lazy generation + persistence). Phase 4.5 scope reduced to persistence
-only because the Q&A AI call landed during Phase 3.
+**Phase 4 — complete**
+Next up: Phase 4.5 (Q&A persistence — DB only, AI call already done in Phase 3).
 
 ## Key Decisions Log
 - React Flow chosen for diagram rendering (rich interactive features, good ecosystem)
@@ -242,3 +282,17 @@ only because the Q&A AI call landed during Phase 3.
 - All fetches and AI calls have explicit error paths — UI never gets stuck on a network or parse failure
 - Q&A in-flight requests use `AbortController` so switching nodes mid-request cancels cleanly
 - Message ids are `crypto.randomUUID()` — `Date.now()` is not collision-safe under rapid sends
+- Prisma 7 has breaking changes (no `url` in schema datasource) — pinned to Prisma 5
+- Prisma CLI reads from `.env`, not `.env.local`; both files exist with `DATABASE_URL`
+- DB node IDs (UUIDs) are used directly as React Flow node IDs — no separate mapping needed
+- Session stored in `localStorage` under key `diagram-learning-session`; cleared on new topic
+- DiagramCanvas uses recursive subtree-width layout so expanded subtrees stay centered under their parent
+- `NodeInfo` now carries `status`, `parentId`, and `hasDiagram`; edges are derived from nodes, not stored separately
+- DiagramCanvas preserves dragged positions across expands via a `knownIdsRef`; only newly-appearing nodes get a layout-computed position
+- `handleNodeClick`'s post-expansion `setSelectedNode` uses a functional update that only writes if the user is still on the same node (prevents a late expansion from clobbering a fresh selection)
+- Session-restore effect always funnels through an async `.finally()` for `setSessionLoading(false)` — React 19's `react-hooks/set-state-in-effect` rule rejects synchronous setState in the effect body
+- `fetchSession` throws a typed `SessionMissingError` on 404; only that case wipes `localStorage` — transient errors surface in the error banner instead of silently destroying the session
+- `/api/generate` writes root + stub children in a single `prisma.$transaction` so a partial failure can't orphan a root node; topics are capped at 200 chars
+- `/api/node` POST uses Prisma 5's extended `where` (`{ id, status: 'stub' }`) for an atomic stub→generated transition; the losing side of a race gets 409
+- `lib/ai.ts` `extractJson` falls back to slicing between the first `{` and last `}` when the model surrounds the JSON with prose; `firstTextBlock` scans for the first text block instead of indexing `content[0]` blindly
+- `prisma/schema.prisma` has `@@index([parentId])` because children-of-parent is a hot path; remember to `npx prisma db push` when the schema changes

@@ -2,6 +2,20 @@ export type NodeInfo = {
   id: string
   label: string
   description?: string
+  status: 'stub' | 'generated'
+  parentId: string | null
+  hasDiagram: boolean
+}
+
+export type DbNode = {
+  id: string
+  sessionId: string
+  parentId: string | null
+  title: string
+  description: string | null
+  hasDiagram: boolean
+  status: string
+  createdAt: string
 }
 
 export type QAClassification = {
@@ -12,7 +26,7 @@ export type QAClassification = {
 export type GenerateResponse = {
   description: string
   needsDiagram: boolean
-  children: { title: string; description: string }[]
+  children: string[]
 }
 
 export type QAResponse = {

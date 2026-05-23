@@ -12,7 +12,14 @@ const client = new Anthropic()
 
 function extractJson(raw: string): string {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-  return fenced ? fenced[1].trim() : raw.trim()
+  if (fenced) return fenced[1].trim()
+  // Fallback: if the model added prose around the JSON, slice between the
+  // first '{' and the last '}'. Safe because our prompts always ask for
+  // a single JSON object, never arrays or multiple objects.
+  const first = raw.indexOf('{')
+  const last = raw.lastIndexOf('}')
+  if (first !== -1 && last > first) return raw.slice(first, last + 1).trim()
+  return raw.trim()
 }
 
 function parseJson<T>(raw: string): T {
@@ -23,32 +30,40 @@ function parseJson<T>(raw: string): T {
   }
 }
 
-export async function generateRootNode(topic: string): Promise<GenerateResponse> {
+function firstTextBlock(content: Anthropic.ContentBlock[]): string {
+  for (const block of content) {
+    if (block.type === 'text') return block.text
+  }
+  return '{}'
+}
+
+export async function generateNode(title: string, ancestorPath: string): Promise<GenerateResponse> {
   const message = await client.messages.create({
     model: MODEL,
     max_tokens: MAX_TOKENS,
     messages: [
       {
         role: 'user',
-        content: `You are a learning assistant. Given a topic, return a JSON object:
-- "description": 2-3 sentences that explain the topic and naturally introduce its key subtopics
-- "needsDiagram": true if the topic has 3-6 distinct subtopics worth exploring visually, false if it is self-contained
-- "children": if needsDiagram is true, an array of subtopics each with "title" and "description" (1-2 sentences). Otherwise an empty array.
+        content: `You are a learning assistant. Return a JSON object for the given topic in context:
+- "description": 2-3 sentences explaining the concept
+- "needsDiagram": true if this concept has 3-6 distinct subtopics worth exploring visually, false if self-contained
+- "children": if needsDiagram is true, an array of 3-6 subtopic title strings (short titles only, no descriptions). Otherwise an empty array.
 
 Return ONLY valid JSON, no markdown.
 
-Topic: ${topic}`,
+Context: ${ancestorPath}
+Topic: ${title}`,
       },
     ],
   })
 
-  const text = message.content[0].type === 'text' ? message.content[0].text : '{}'
+  const text = firstTextBlock(message.content)
   const parsed = parseJson<Partial<GenerateResponse>>(text)
 
   return {
     description: parsed.description ?? '',
     needsDiagram: parsed.needsDiagram ?? false,
-    children: Array.isArray(parsed.children) ? parsed.children : [],
+    children: Array.isArray(parsed.children) ? (parsed.children as string[]).filter(c => typeof c === 'string') : [],
   }
 }
 
@@ -83,7 +98,7 @@ If no classifications apply, return an empty array and false for offerDiagram.`
     ],
   })
 
-  const raw = message.content[0].type === 'text' ? message.content[0].text : '{}'
+  const raw = firstTextBlock(message.content)
   const parsed = parseJson<Partial<QAResponse>>(raw)
 
   return {
