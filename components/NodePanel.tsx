@@ -75,7 +75,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
   const questionCount = messages.filter(m => m.role === 'user').length
 
   return (
-    <div className="w-[420px] h-full flex flex-col border-l border-slate-800 bg-slate-900 shrink-0">
+    <div className="w-96 h-full flex flex-col border-l border-slate-800 bg-slate-900 shrink-0 overflow-hidden">
 
       <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 shrink-0">
         <h2 className="text-slate-100 font-semibold text-sm truncate pr-4">{node.label}</h2>
@@ -132,7 +132,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
                     {msg.content}
                   </div>
                 ) : (
-                  <div className="w-full space-y-3">
+                  <div className="w-full min-w-0 space-y-3">
                     <div className="px-3 py-2 rounded-xl rounded-bl-sm bg-slate-800 text-slate-200 text-sm leading-relaxed">
                       {msg.content}
                     </div>
@@ -169,7 +169,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
                     )}
 
                     {msg.diagramAccepted && msg.classifications && (
-                      <div className="overflow-x-auto">
+                      <div className="w-full min-w-0">
                         <QAInlineDiagram
                           rootLabel={node.label}
                           classifications={msg.classifications}

@@ -64,7 +64,7 @@ export default function QAInlineDiagram({ rootLabel, classifications }: Props) {
   }))
 
   return (
-    <div style={{ height: 280, width: Math.max(totalWidth + 20, 300) }} className="rounded-lg overflow-hidden border border-slate-700">
+    <div className="w-full rounded-lg overflow-hidden border border-slate-700" style={{ height: 260 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
