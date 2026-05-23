@@ -3,15 +3,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { NodeInfo } from '@/lib/types'
 
-const descriptions: Record<string, string> = {
-  root: 'Machine Learning is a subset of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed. It focuses on developing programs that can access data and use it to learn for themselves — identifying patterns, making decisions, and improving over time.',
-  '1': 'Supervised Learning trains models on labeled data where each input has a known correct output. The algorithm learns to map inputs to outputs by minimizing prediction errors. Common examples include spam detection, image classification, and price prediction.',
-  '2': 'Unsupervised Learning finds hidden patterns in unlabeled data without predefined answers. Techniques include clustering (grouping similar items), dimensionality reduction (simplifying data), and anomaly detection. Used in customer segmentation and recommendation systems.',
-  '3': 'Reinforcement Learning trains an agent to make decisions by rewarding good actions and penalizing bad ones. The agent explores an environment, learns from feedback, and optimizes for long-term reward. Used in game AI, robotics, and autonomous driving.',
-  '4': 'Neural Networks are computing systems inspired by the human brain. They consist of layers of interconnected nodes that transform inputs into outputs. Deep neural networks power modern AI breakthroughs in image recognition, language understanding, and more.',
-  '5': 'Feature Engineering is the process of using domain knowledge to create, select, and transform input variables that make machine learning models perform better. Often the most impactful step — good features can make a simple model outperform a complex one.',
-}
-
 type Message = {
   id: string
   role: 'user' | 'assistant'
@@ -97,9 +88,13 @@ export default function NodePanel({ node, onClose }: Props) {
       {/* Description tab */}
       {activeTab === 'description' && (
         <div className="flex-1 overflow-y-auto px-5 py-5">
-          <p className="text-slate-300 text-sm leading-relaxed">
-            {descriptions[node.id] ?? 'No description available yet.'}
-          </p>
+          {node.description ? (
+            <p className="text-slate-300 text-sm leading-relaxed">{node.description}</p>
+          ) : (
+            <p className="text-slate-500 text-sm leading-relaxed italic">
+              Content for this node will be generated when you expand it — coming in the next phase.
+            </p>
+          )}
         </div>
       )}
 

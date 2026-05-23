@@ -5,54 +5,29 @@ import { ReactFlow, Background, Controls, Handle, Position, type NodeProps, type
 import '@xyflow/react/dist/style.css'
 import type { NodeInfo } from '@/lib/types'
 
-const initialNodes = [
-  {
-    id: 'root',
-    type: 'topicNode',
-    position: { x: 340, y: 40 },
-    data: { label: 'Machine Learning', isRoot: true, isSelected: false },
-  },
-  {
-    id: '1',
-    type: 'topicNode',
-    position: { x: 20, y: 220 },
-    data: { label: 'Supervised Learning', isRoot: false, isSelected: false },
-  },
-  {
-    id: '2',
-    type: 'topicNode',
-    position: { x: 200, y: 220 },
-    data: { label: 'Unsupervised Learning', isRoot: false, isSelected: false },
-  },
-  {
-    id: '3',
-    type: 'topicNode',
-    position: { x: 390, y: 220 },
-    data: { label: 'Reinforcement Learning', isRoot: false, isSelected: false },
-  },
-  {
-    id: '4',
-    type: 'topicNode',
-    position: { x: 570, y: 220 },
-    data: { label: 'Neural Networks', isRoot: false, isSelected: false },
-  },
-  {
-    id: '5',
-    type: 'topicNode',
-    position: { x: 740, y: 220 },
-    data: { label: 'Feature Engineering', isRoot: false, isSelected: false },
-  },
-]
+const NODE_WIDTH = 160
+const NODE_GAP = 30
 
-const edgeStyle = { stroke: '#6366f1', strokeWidth: 1.5 }
+function buildFlowNodes(nodes: NodeInfo[], selectedNodeId: string | null) {
+  const childCount = nodes.length - 1
+  const totalWidth = childCount * NODE_WIDTH + (childCount - 1) * NODE_GAP
+  const rootX = totalWidth / 2 - NODE_WIDTH / 2
 
-const initialEdges = [
-  { id: 'e-r-1', source: 'root', target: '1', style: edgeStyle },
-  { id: 'e-r-2', source: 'root', target: '2', style: edgeStyle },
-  { id: 'e-r-3', source: 'root', target: '3', style: edgeStyle },
-  { id: 'e-r-4', source: 'root', target: '4', style: edgeStyle },
-  { id: 'e-r-5', source: 'root', target: '5', style: edgeStyle },
-]
+  return nodes.map((node, i) => ({
+    id: node.id,
+    type: 'topicNode',
+    position:
+      i === 0
+        ? { x: rootX, y: 40 }
+        : { x: (i - 1) * (NODE_WIDTH + NODE_GAP), y: 220 },
+    data: {
+      label: node.label,
+      description: node.description,
+      isRoot: i === 0,
+      isSelected: node.id === selectedNodeId,
+    },
+  }))
+}
 
 function TopicNode({ data }: NodeProps) {
   const isRoot = data.isRoot as boolean
@@ -79,36 +54,39 @@ function TopicNode({ data }: NodeProps) {
 }
 
 const nodeTypes = { topicNode: TopicNode }
+const edgeStyle = { stroke: '#6366f1', strokeWidth: 1.5 }
+
+type DiagramEdge = { id: string; source: string; target: string }
 
 type Props = {
+  nodes: NodeInfo[]
+  edges: DiagramEdge[]
   selectedNodeId: string | null
   onNodeClick: (node: NodeInfo) => void
 }
 
-export default function DiagramCanvas({ selectedNodeId, onNodeClick }: Props) {
-  const [nodes, setNodes] = useState(initialNodes)
+export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClick }: Props) {
+  const [flowNodes, setFlowNodes] = useState(() => buildFlowNodes(nodes, selectedNodeId))
 
   useEffect(() => {
-    setNodes(prev =>
-      prev.map(n => ({
-        ...n,
-        data: { ...n.data, isSelected: n.id === selectedNodeId },
-      }))
-    )
-  }, [selectedNodeId])
+    setFlowNodes(buildFlowNodes(nodes, selectedNodeId))
+  }, [nodes, selectedNodeId])
+
+  const flowEdges = edges.map(e => ({ ...e, style: edgeStyle }))
 
   const handleNodeClick = useCallback(
-    (_: React.MouseEvent, node: Node) => {
-      onNodeClick({ id: node.id, label: node.data.label as string })
+    (_: React.MouseEvent, flowNode: Node) => {
+      const source = nodes.find(n => n.id === flowNode.id)
+      if (source) onNodeClick(source)
     },
-    [onNodeClick]
+    [nodes, onNodeClick]
   )
 
   return (
     <div className="w-full h-full">
       <ReactFlow
-        nodes={nodes}
-        edges={initialEdges}
+        nodes={flowNodes}
+        edges={flowEdges}
         nodeTypes={nodeTypes}
         nodesDraggable={false}
         nodesConnectable={false}
