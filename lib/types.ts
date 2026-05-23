@@ -42,4 +42,8 @@ export type Message = {
   classifications?: QAClassification[]
   offerDiagram?: boolean
   diagramAccepted?: boolean
+  // Locally-generated error bubble (e.g. fetch failed). Persisted only in
+  // the in-memory thread, never sent back to the AI as history, and never
+  // written to the DB (the POST that failed never completed).
+  isError?: boolean
 }

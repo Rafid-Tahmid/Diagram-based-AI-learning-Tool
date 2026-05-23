@@ -33,7 +33,9 @@ function dbMsgToMessage(row: DbQAMessage): Message {
     Array.isArray(row.diagram) ? (row.diagram as QAClassification[]) : undefined
   return {
     id: row.id,
-    role: row.role as 'user' | 'assistant',
+    // Defensive narrowing — anything that's not exactly 'user' is treated as
+    // assistant. Prevents a malformed DB row from rendering on the wrong side.
+    role: row.role === 'user' ? 'user' : 'assistant',
     content: row.content,
     classifications,
     offerDiagram: false,
@@ -123,6 +125,14 @@ export default function Home() {
   const [expandingNodes, setExpandingNodes] = useState<Set<string>>(new Set())
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set())
   const loadedThreadsRef = useRef<Set<string>>(new Set())
+  // Mirror of `expandingNodes` for synchronous read-then-write guarding —
+  // rapid double-clicks would otherwise both see an empty set and both fire.
+  const expandingRef = useRef<Set<string>>(new Set())
+  // Incremented on every new-topic submit and on session restore. Async
+  // handlers capture the version at start and bail out if it has changed
+  // before committing results, so a stale fetch can't write into the
+  // wrong session's state.
+  const sessionVersionRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -161,14 +171,25 @@ export default function Home() {
   useEffect(() => {
     if (!selectedNode || loadedThreadsRef.current.has(selectedNode.id)) return
     const nodeId = selectedNode.id
+    const startVersion = sessionVersionRef.current
     loadedThreadsRef.current.add(nodeId)
     fetch(`/api/qa?nodeId=${encodeURIComponent(nodeId)}`)
       .then(res => res.json())
       .then((json: unknown) => {
+        // Session was reset while this fetch was in flight — drop the result
+        // so we don't write into a different session's map.
+        if (sessionVersionRef.current !== startVersion) return
         if (!json || typeof json !== 'object' || !('data' in json)) return
         const rows = (json as { data: DbQAMessage[] }).data
         if (rows.length === 0) return
-        setNodeMessages(prev => new Map(prev).set(nodeId, rows.map(dbMsgToMessage)))
+        // If the live conversation has already populated this thread (the user
+        // sent a question while the historical fetch was still in flight),
+        // local state is the source of truth — don't clobber it with the
+        // possibly-stale DB snapshot.
+        setNodeMessages(prev => {
+          if (prev.has(nodeId)) return prev
+          return new Map(prev).set(nodeId, rows.map(dbMsgToMessage))
+        })
       })
       .catch(() => {})
   }, [selectedNode])
@@ -221,10 +242,17 @@ export default function Home() {
     setNodePath([])
     setNodeMessages(new Map())
     setCollapsedNodes(new Set())
+    setExpandingNodes(new Set())
     loadedThreadsRef.current = new Set()
+    expandingRef.current = new Set()
+    // Invalidate any in-flight expansions / thread loads from the prior
+    // session; their late-arriving results will be dropped below.
+    sessionVersionRef.current++
+    const startVersion = sessionVersionRef.current
 
     try {
       const { sessionId, nodes: dbNodes } = await fetchGenerate(topic)
+      if (sessionVersionRef.current !== startVersion) return
       localStorage.setItem(SESSION_KEY, sessionId)
       const infos = dbNodes.map(dbNodeToInfo)
       setNodes(infos)
@@ -234,9 +262,10 @@ export default function Home() {
         setNodePath([root])
       }
     } catch (err) {
+      if (sessionVersionRef.current !== startVersion) return
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
-      setLoading(false)
+      if (sessionVersionRef.current === startVersion) setLoading(false)
     }
   }, [inputValue, loading])
 
@@ -259,11 +288,22 @@ export default function Home() {
       return
     }
 
-    if (expandingNodes.has(node.id)) return
-
+    // Ref-based guard so rapid double-clicks don't both pass the gate before
+    // setExpandingNodes flushes. The server's atomic stub->generated update
+    // would still protect DB state, but the loser would surface a 409 in the
+    // red banner — jarring for what is effectively the same click.
+    if (expandingRef.current.has(node.id)) return
+    expandingRef.current.add(node.id)
     setExpandingNodes(prev => new Set(prev).add(node.id))
+
+    const startVersion = sessionVersionRef.current
+
     try {
       const { node: updatedDb, children } = await fetchExpandNode(node.id)
+      // Session changed mid-flight (new topic submitted) — discard so we
+      // don't insert orphan children into an unrelated session.
+      if (sessionVersionRef.current !== startVersion) return
+
       const updatedInfo = dbNodeToInfo(updatedDb)
       const childInfos = children.map(dbNodeToInfo)
 
@@ -273,15 +313,17 @@ export default function Home() {
       setSelectedNode(current => current?.id === node.id ? updatedInfo : current)
       setNodePath(prev => prev.map(n => n.id === node.id ? updatedInfo : n))
     } catch (err) {
+      if (sessionVersionRef.current !== startVersion) return
       setError(err instanceof Error ? err.message : 'Generation failed')
     } finally {
+      expandingRef.current.delete(node.id)
       setExpandingNodes(prev => {
         const next = new Set(prev)
         next.delete(node.id)
         return next
       })
     }
-  }, [nodes, expandingNodes])
+  }, [nodes])
 
   const handleBreadcrumbNavigate = useCallback((node: NodeInfo, index: number) => {
     setNodePath(prev => prev.slice(0, index + 1))

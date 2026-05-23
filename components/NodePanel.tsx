@@ -15,22 +15,18 @@ type Props = {
   isExpanding: boolean
 }
 
-async function fetchAnswer(
-  body: {
-    nodeId: string
-    nodeTitle: string
-    nodeDescription: string
-    ancestorPath: string
-    history: { role: 'user' | 'assistant'; content: string }[]
-    question: string
-  },
-  signal: AbortSignal
-): Promise<QAResponse> {
+async function fetchAnswer(body: {
+  nodeId: string
+  nodeTitle: string
+  nodeDescription: string
+  ancestorPath: string
+  history: { role: 'user' | 'assistant'; content: string }[]
+  question: string
+}): Promise<QAResponse> {
   const res = await fetch('/api/qa', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal,
   })
 
   const json: unknown = await res.json().catch(() => null)
@@ -52,14 +48,15 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const abortRef = useRef<AbortController | null>(null)
+  // Tracks whether this panel is still mounted. We intentionally do NOT abort
+  // in-flight Q&A requests on node switch: the server saves both messages
+  // anyway, and aborting would leave the assistant reply only in the DB,
+  // invisible to the user until a full page refresh.
+  const mountedRef = useRef(true)
 
-  // The parent passes a `key={node.id}` so this panel remounts when the selected
-  // node changes — no need for an effect to reset state. The cleanup below
-  // therefore also covers node switches: unmount aborts any in-flight request.
   useEffect(() => {
     return () => {
-      abortRef.current?.abort()
+      mountedRef.current = false
     }
   }, [])
 
@@ -77,24 +74,21 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
     setInput('')
     setIsTyping(true)
 
-    const history = messages.map(m => ({ role: m.role, content: m.content }))
-
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
+    // Error messages are excluded from the AI's view of history so the model
+    // doesn't see its own apology and drift on the next turn.
+    const history = messages
+      .filter(m => !m.isError)
+      .map(m => ({ role: m.role, content: m.content }))
 
     try {
-      const data = await fetchAnswer(
-        {
-          nodeId: node.id,
-          nodeTitle: node.label,
-          nodeDescription: node.description ?? '',
-          ancestorPath,
-          history,
-          question: text,
-        },
-        controller.signal
-      )
+      const data = await fetchAnswer({
+        nodeId: node.id,
+        nodeTitle: node.label,
+        nodeDescription: node.description ?? '',
+        ancestorPath,
+        history,
+        question: text,
+      })
 
       const classifications = data.classifications ?? []
       const reply: Message = {
@@ -106,16 +100,15 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
       }
       onMessagesChange([...next, reply])
     } catch (err) {
-      if (controller.signal.aborted) return
       const errorReply: Message = {
         id: crypto.randomUUID(),
         role: 'assistant',
         content: `Sorry, I couldn't answer that: ${err instanceof Error ? err.message : 'unknown error'}`,
+        isError: true,
       }
       onMessagesChange([...next, errorReply])
     } finally {
-      if (!controller.signal.aborted) setIsTyping(false)
-      if (abortRef.current === controller) abortRef.current = null
+      if (mountedRef.current) setIsTyping(false)
     }
   }
 
@@ -179,9 +172,14 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
       {activeTab === 'ask' && (
         <div className="flex flex-col flex-1 min-h-0">
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-            {messages.length === 0 && !isTyping && (
+            {messages.length === 0 && !isTyping && !isExpanding && (
               <p className="text-slate-600 text-xs text-center mt-6">
                 Ask anything about {node.label}
+              </p>
+            )}
+            {messages.length === 0 && isExpanding && (
+              <p className="text-slate-600 text-xs text-center mt-6">
+                Generating description… ask once it&apos;s ready.
               </p>
             )}
 
@@ -262,13 +260,13 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleSend()}
-                placeholder={`Ask about ${node.label}...`}
-                disabled={isTyping}
+                placeholder={isExpanding ? 'Waiting for description…' : `Ask about ${node.label}...`}
+                disabled={isTyping || isExpanding}
                 className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
               />
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || isTyping}
+                disabled={!input.trim() || isTyping || isExpanding}
                 className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-lg px-3 py-2 text-sm font-medium transition-colors shrink-0"
               >
                 ↑
