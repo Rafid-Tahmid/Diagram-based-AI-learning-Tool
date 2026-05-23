@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(npx playwright *)",
+      "Bash(node /tmp/*.mjs)",
+      "Bash(node /tmp/*.js)",
+      "Bash(npx prisma *)",
+      "Bash(docker *)",
+      "Bash(mkdir -p *)",
+      "Bash(ls *)",
+      "Bash(curl -s -o /dev/null -w * http://localhost:3000)"
+    ]
+  }
+}
