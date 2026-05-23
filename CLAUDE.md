@@ -151,9 +151,12 @@ Components: `DiagramCanvas.tsx`, `NodePanel.tsx`, `Breadcrumb.tsx`, `lib/types.t
 titles as JSON → frontend renders as a real React Flow diagram.
 **Done when:** Type "Machine Learning" → real AI-generated diagram appears.
 **Built:** Topic input bar replaces hardcoded diagram. `lib/ai.ts` calls Claude Sonnet,
-returns `{ description, children[] }` as JSON. `/api/generate` POST route wires it up.
-`DiagramCanvas` now accepts dynamic nodes/edges with computed layout. `NodePanel` uses
-real description from the root node; child nodes show a placeholder until Phase 4.
+returns `{ description, needsDiagram, children[] }` as JSON. `/api/generate` POST route
+wires it up. `DiagramCanvas` accepts dynamic nodes/edges with computed layout; nodes are
+draggable. Root node panel auto-opens on load so description appears immediately. AI
+decides if a diagram is needed — simple topics get no child nodes. Per-node Q&A message
+history stored in a `Map<nodeId, Message[]>` in the page so switching nodes preserves
+each thread. `Message` type moved to `lib/types.ts`.
 
 ### Phase 4 — Lazy Generation + Persistence (not started)
 **Goal:** Clicking any node calls the AI to generate its content on demand.
@@ -203,3 +206,7 @@ User can jump to any previously visited node. "Reset" button clears the session.
 - Q&A inline diagrams are display-only: clicking them does nothing, they are not lazy-expandable
 - Q&A threads are stored in QAMessage table keyed by nodeId, so each node has its own thread
 - Claude prompt returns raw JSON (no markdown wrapper) — no stripping needed, parse directly
+- Root node panel auto-opens after generation so description is shown before user clicks anything
+- `needsDiagram` flag lets AI skip child nodes for simple/self-contained topics
+- Per-node Q&A threads held in `Map<nodeId, Message[]>` in page state (DB persistence in Phase 4.5)
+- Nodes are draggable — positions reset only when a new diagram is generated
