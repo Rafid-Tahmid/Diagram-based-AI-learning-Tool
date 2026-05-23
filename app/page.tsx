@@ -9,13 +9,14 @@ import type { NodeInfo, Message, GenerateResponse } from '@/lib/types'
 type DiagramState = {
   nodes: NodeInfo[]
   edges: { id: string; source: string; target: string }[]
+  needsDiagram: boolean
 }
 
 function buildDiagram(topic: string, data: GenerateResponse): DiagramState {
   const root: NodeInfo = { id: 'root', label: topic, description: data.description }
 
   if (!data.needsDiagram || data.children.length === 0) {
-    return { nodes: [root], edges: [] }
+    return { nodes: [root], edges: [], needsDiagram: false }
   }
 
   const children = data.children.map((c, i) => ({
@@ -24,13 +25,35 @@ function buildDiagram(topic: string, data: GenerateResponse): DiagramState {
     description: c.description,
   }))
   const edges = children.map((c, i) => ({ id: `e-root-${i}`, source: 'root', target: c.id }))
-  return { nodes: [root, ...children], edges }
+  return { nodes: [root, ...children], edges, needsDiagram: true }
+}
+
+async function fetchGenerate(topic: string): Promise<GenerateResponse> {
+  const res = await fetch('/api/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic }),
+  })
+
+  const json: unknown = await res.json().catch(() => null)
+  if (!res.ok) {
+    const errMsg =
+      json && typeof json === 'object' && 'error' in json && typeof (json as { error: unknown }).error === 'string'
+        ? (json as { error: string }).error
+        : `Request failed (${res.status})`
+    throw new Error(errMsg)
+  }
+  if (!json || typeof json !== 'object' || !('data' in json)) {
+    throw new Error('Malformed response from server')
+  }
+  return (json as { data: GenerateResponse }).data
 }
 
 export default function Home() {
   const [inputValue, setInputValue] = useState('')
   const [diagram, setDiagram] = useState<DiagramState | null>(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<NodeInfo | null>(null)
   const [nodePath, setNodePath] = useState<NodeInfo[]>([])
   const [nodeMessages, setNodeMessages] = useState<Map<string, Message[]>>(new Map())
@@ -40,24 +63,24 @@ export default function Home() {
     if (!topic || loading) return
 
     setLoading(true)
+    setError(null)
     setDiagram(null)
     setSelectedNode(null)
     setNodePath([])
     setNodeMessages(new Map())
 
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic }),
-    })
-    const json = await res.json() as { data: GenerateResponse }
-    const built = buildDiagram(topic, json.data)
-    const root = built.nodes[0]
-
-    setDiagram(built)
-    setSelectedNode(root)
-    setNodePath([root])
-    setLoading(false)
+    try {
+      const data = await fetchGenerate(topic)
+      const built = buildDiagram(topic, data)
+      const root = built.nodes[0]
+      setDiagram(built)
+      setSelectedNode(root)
+      setNodePath([root])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setLoading(false)
+    }
   }, [inputValue, loading])
 
   const handleNodeClick = useCallback((node: NodeInfo) => {
@@ -118,8 +141,21 @@ export default function Home() {
             </button>
           </div>
 
+          {error && (
+            <div className="px-6 py-2 border-b border-slate-800 shrink-0 flex items-center justify-between gap-3 bg-red-950/40">
+              <p className="text-red-300 text-xs">{error}</p>
+              <button
+                onClick={() => setError(null)}
+                className="text-red-300 hover:text-red-100 text-xs shrink-0"
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
           <div className="flex-1 min-h-0">
-            {!diagram && !loading && (
+            {!diagram && !loading && !error && (
               <div className="flex items-center justify-center h-full">
                 <p className="text-slate-600 text-sm">Type a topic above to get started.</p>
               </div>
@@ -136,6 +172,7 @@ export default function Home() {
                 edges={diagram.edges}
                 selectedNodeId={selectedNode?.id ?? null}
                 onNodeClick={handleNodeClick}
+                needsDiagram={diagram.needsDiagram}
               />
             )}
           </div>
@@ -143,6 +180,7 @@ export default function Home() {
 
         {selectedNode && (
           <NodePanel
+            key={selectedNode.id}
             node={selectedNode}
             onClose={handleClose}
             messages={nodeMessages.get(selectedNode.id) ?? []}

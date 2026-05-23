@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, useMemo } from 'react'
 import {
   ReactFlow, Background, Controls, Handle, Position,
   useNodesState, type NodeProps, type Node,
@@ -66,9 +66,10 @@ type Props = {
   edges: DiagramEdge[]
   selectedNodeId: string | null
   onNodeClick: (node: NodeInfo) => void
+  needsDiagram?: boolean
 }
 
-export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClick }: Props) {
+export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClick, needsDiagram = true }: Props) {
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(
     buildFlowNodes(nodes, selectedNodeId)
   )
@@ -86,7 +87,10 @@ export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClic
     )
   }, [selectedNodeId, setFlowNodes])
 
-  const flowEdges = edges.map(e => ({ ...e, style: edgeStyle }))
+  const flowEdges = useMemo(
+    () => edges.map(e => ({ ...e, style: edgeStyle })),
+    [edges]
+  )
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, flowNode: Node) => {
@@ -97,7 +101,7 @@ export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClic
   )
 
   return (
-    <div className="w-full h-full">
+    <div className="w-full h-full relative">
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges}
@@ -112,6 +116,12 @@ export default function DiagramCanvas({ nodes, edges, selectedNodeId, onNodeClic
         <Background color="#1e293b" gap={24} />
         <Controls />
       </ReactFlow>
+
+      {!needsDiagram && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-slate-800/80 border border-slate-700 text-slate-400 text-xs pointer-events-none">
+          This topic is self-contained — no sub-diagram needed
+        </div>
+      )}
     </div>
   )
 }

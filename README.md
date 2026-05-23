@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Diagram Learning Tool
 
-## Getting Started
+A learning tool that turns any topic into an interactive diagram. Type a topic,
+the AI generates a root description plus a small set of subtopics, and a per-node
+chat lets you ask follow-up questions with optional inline diagrams.
 
-First, run the development server:
+Content is generated lazily, only when the user requests it, to keep token usage low.
+
+## Stack
+- **Framework:** Next.js 16 (App Router) + React 19 + TypeScript
+- **Diagrams:** `@xyflow/react` (React Flow)
+- **AI:** Anthropic Claude (via `@anthropic-ai/sdk`)
+- **Styling:** Tailwind CSS v4
+
+## Getting started
+
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Create `.env.local` in the project root:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+3. Run the dev server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:3000> and type a topic.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project layout
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+/app
+  layout.tsx              root layout (Geist font, dark theme)
+  page.tsx                main page: input, diagram canvas, side panel
+  /api
+    /generate/route.ts    POST: topic -> { description, needsDiagram, children[] }
+    /qa/route.ts          POST: question -> { answer, classifications[], offerDiagram }
+/components
+  DiagramCanvas.tsx       React Flow canvas with custom topic nodes
+  NodePanel.tsx           right panel: Description tab + Ask (chat) tab
+  QAInlineDiagram.tsx     display-only diagram rendered inside a chat reply
+  Breadcrumb.tsx          path nav above the canvas
+/lib
+  ai.ts                   Anthropic client wrappers (generateRootNode, answerQuestion)
+  types.ts                shared TypeScript types
+```
 
-## Learn More
+## Current phase
 
-To learn more about Next.js, take a look at the following resources:
+Phase 3 complete (interactive AI-generated diagrams + per-node Q&A in memory).
+See `CLAUDE.md` for the full phase plan and what's coming next.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Scripts
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `npm run dev` — start the dev server
+- `npm run build` — production build
+- `npm run start` — serve the production build
+- `npm run lint` — ESLint

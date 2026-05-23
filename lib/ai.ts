@@ -1,6 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { GenerateResponse, QAResponse } from '@/lib/types'
 
+const MODEL = 'claude-sonnet-4-6'
+const MAX_TOKENS = 1024
+
+if (!process.env.ANTHROPIC_API_KEY) {
+  throw new Error('ANTHROPIC_API_KEY is not set. Add it to .env.local.')
+}
+
 const client = new Anthropic()
 
 function extractJson(raw: string): string {
@@ -8,10 +15,18 @@ function extractJson(raw: string): string {
   return fenced ? fenced[1].trim() : raw.trim()
 }
 
+function parseJson<T>(raw: string): T {
+  try {
+    return JSON.parse(extractJson(raw)) as T
+  } catch {
+    throw new Error(`Model returned non-JSON: ${raw.slice(0, 200)}`)
+  }
+}
+
 export async function generateRootNode(topic: string): Promise<GenerateResponse> {
   const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
+    model: MODEL,
+    max_tokens: MAX_TOKENS,
     messages: [
       {
         role: 'user',
@@ -28,7 +43,13 @@ Topic: ${topic}`,
   })
 
   const text = message.content[0].type === 'text' ? message.content[0].text : '{}'
-  return JSON.parse(extractJson(text)) as GenerateResponse
+  const parsed = parseJson<Partial<GenerateResponse>>(text)
+
+  return {
+    description: parsed.description ?? '',
+    needsDiagram: parsed.needsDiagram ?? false,
+    children: Array.isArray(parsed.children) ? parsed.children : [],
+  }
 }
 
 export async function answerQuestion(
@@ -53,15 +74,21 @@ Always return ONLY valid JSON:
 If no classifications apply, return an empty array and false for offerDiagram.`
 
   const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
+    model: MODEL,
+    max_tokens: MAX_TOKENS,
     system: systemPrompt,
     messages: [
-      ...history.map(h => ({ role: h.role as 'user' | 'assistant', content: h.content })),
+      ...history.map(h => ({ role: h.role, content: h.content })),
       { role: 'user', content: question },
     ],
   })
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : '{}'
-  return JSON.parse(extractJson(raw)) as QAResponse
+  const parsed = parseJson<Partial<QAResponse>>(raw)
+
+  return {
+    answer: parsed.answer ?? '',
+    classifications: Array.isArray(parsed.classifications) ? parsed.classifications : [],
+    offerDiagram: parsed.offerDiagram ?? false,
+  }
 }

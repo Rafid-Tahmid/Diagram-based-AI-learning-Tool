@@ -14,17 +14,52 @@ type Props = {
   ancestorPath: string
 }
 
+async function fetchAnswer(
+  body: {
+    nodeTitle: string
+    nodeDescription: string
+    ancestorPath: string
+    history: { role: 'user' | 'assistant'; content: string }[]
+    question: string
+  },
+  signal: AbortSignal
+): Promise<QAResponse> {
+  const res = await fetch('/api/qa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+
+  const json: unknown = await res.json().catch(() => null)
+  if (!res.ok) {
+    const errMsg =
+      json && typeof json === 'object' && 'error' in json && typeof (json as { error: unknown }).error === 'string'
+        ? (json as { error: string }).error
+        : `Request failed (${res.status})`
+    throw new Error(errMsg)
+  }
+  if (!json || typeof json !== 'object' || !('data' in json)) {
+    throw new Error('Malformed response from server')
+  }
+  return (json as { data: QAResponse }).data
+}
+
 export default function NodePanel({ node, onClose, messages, onMessagesChange, ancestorPath }: Props) {
   const [activeTab, setActiveTab] = useState<'description' | 'ask'>('description')
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
+  // The parent passes a `key={node.id}` so this panel remounts when the selected
+  // node changes — no need for an effect to reset state. The cleanup below
+  // therefore also covers node switches: unmount aborts any in-flight request.
   useEffect(() => {
-    setActiveTab('description')
-    setInput('')
-    setIsTyping(false)
-  }, [node.id])
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -34,7 +69,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
     const text = input.trim()
     if (!text || isTyping) return
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: text }
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: text }
     const next = [...messages, userMsg]
     onMessagesChange(next)
     setInput('')
@@ -42,34 +77,51 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
 
     const history = messages.map(m => ({ role: m.role, content: m.content }))
 
-    const res = await fetch('/api/qa', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        nodeTitle: node.label,
-        nodeDescription: node.description ?? '',
-        ancestorPath,
-        history,
-        question: text,
-      }),
-    })
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
 
-    const json = await res.json() as { data: QAResponse }
-    const { answer, classifications, offerDiagram } = json.data
+    try {
+      const data = await fetchAnswer(
+        {
+          nodeTitle: node.label,
+          nodeDescription: node.description ?? '',
+          ancestorPath,
+          history,
+          question: text,
+        },
+        controller.signal
+      )
 
-    const reply: Message = {
-      id: (Date.now() + 1).toString(),
-      role: 'assistant',
-      content: answer,
-      classifications: classifications.length > 0 ? classifications : undefined,
-      offerDiagram: offerDiagram && classifications.length >= 3,
+      const classifications = data.classifications ?? []
+      const reply: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: data.answer || '(no answer returned)',
+        classifications: classifications.length > 0 ? classifications : undefined,
+        offerDiagram: data.offerDiagram && classifications.length >= 3,
+      }
+      onMessagesChange([...next, reply])
+    } catch (err) {
+      if (controller.signal.aborted) return
+      const errorReply: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `Sorry, I couldn't answer that: ${err instanceof Error ? err.message : 'unknown error'}`,
+      }
+      onMessagesChange([...next, errorReply])
+    } finally {
+      if (!controller.signal.aborted) setIsTyping(false)
+      if (abortRef.current === controller) abortRef.current = null
     }
-    onMessagesChange([...next, reply])
-    setIsTyping(false)
   }
 
   const acceptDiagram = (msgId: string) => {
     onMessagesChange(messages.map(m => m.id === msgId ? { ...m, diagramAccepted: true } : m))
+  }
+
+  const declineDiagram = (msgId: string) => {
+    onMessagesChange(messages.map(m => m.id === msgId ? { ...m, offerDiagram: false } : m))
   }
 
   const questionCount = messages.filter(m => m.role === 'user').length
@@ -159,7 +211,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
                             Yes, show diagram
                           </button>
                           <button
-                            onClick={() => onMessagesChange(messages.map(m => m.id === msg.id ? { ...m, offerDiagram: false } : m))}
+                            onClick={() => declineDiagram(msg.id)}
                             className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 px-3 py-1.5 rounded-lg transition-colors"
                           >
                             No thanks

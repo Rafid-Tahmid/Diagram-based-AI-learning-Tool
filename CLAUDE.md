@@ -158,22 +158,46 @@ decides if a diagram is needed — simple topics get no child nodes. Per-node Q&
 history stored in a `Map<nodeId, Message[]>` in the page so switching nodes preserves
 each thread. `Message` type moved to `lib/types.ts`.
 
+**Also built during Phase 3 (originally Phase 4.5 territory — no persistence yet):**
+- `/api/qa` route + `answerQuestion()` in `lib/ai.ts`
+- `NodePanel` Ask tab wired to a real Claude call (replaces Phase 2's hardcoded replies)
+- AI returns `{ answer, classifications[], offerDiagram }`
+- `QAInlineDiagram` renders a display-only sub-diagram from the classifications when
+  the user accepts the "show diagram" offer
+- Q&A threads still live in memory only (Map<nodeId, Message[]>); DB persistence is the
+  remaining Phase 4.5 work
+
+**Hardening pass (post-Phase-3 cleanup):**
+- All fetches (page + panel) wrapped in try/catch with a finally that clears loading state
+- Both API routes wrapped in try/catch and validate the request body before calling the AI
+- `lib/ai.ts` extracted model name into a constant, wraps `JSON.parse` to surface useful
+  errors, defaults missing fields, and asserts `ANTHROPIC_API_KEY` at module load
+- Errors surface in the UI: a dismissible red banner on the main page; an inline assistant
+  bubble in the Ask tab
+- Q&A requests use `AbortController` so switching nodes cancels the in-flight request
+  instead of leaking a typing indicator onto the next node
+- Message ids switched from `Date.now()` to `crypto.randomUUID()` to eliminate collision
+  risk on rapid sends
+- `DiagramCanvas` memoizes `flowEdges` and shows a "self-contained — no sub-diagram needed"
+  hint when `needsDiagram=false`
+- Breadcrumb renders the current segment as a `<span>`, not a dead button
+- Global CSS no longer overrides the Geist font; body background set to slate-950 to
+  eliminate the initial white flash
+- Response body shapes validated on the client (no more blind `as` casts)
+
 ### Phase 4 — Lazy Generation + Persistence (not started)
 **Goal:** Clicking any node calls the AI to generate its content on demand.
 All generated nodes are saved to PostgreSQL via Prisma. Refreshing the page
 restores the explored tree without regenerating anything.
 **Done when:** Click node → loading spinner → content appears → refresh → content still there.
-**Do NOT build:** Q&A AI or Q&A persistence yet.
+**Do NOT build:** Q&A persistence yet (that's Phase 4.5).
 
-### Phase 4.5 — Q&A AI + Persistence (not started)
-**Goal:** The Ask tab in the node panel is wired to a real AI call via /api/qa.
-The AI receives the node context (ancestor path + node description) and the
-conversation history, then answers. If the answer includes a diagram, it renders
-inline in the chat. Q&A threads are saved to DB (QAMessage table) per node.
-Switching to a different node and back restores that node's Q&A thread.
-Inline Q&A diagrams are display-only — they do NOT create nodes in the main diagram.
-**Done when:** Ask a question on a node → real answer streams in → ask follow-up →
-answer is context-aware → switch nodes → come back → thread is still there.
+### Phase 4.5 — Q&A Persistence (scope reduced — AI call already done in Phase 3)
+**Goal:** Persist Q&A threads to a `QAMessage` table per node so they survive page refresh.
+Switching to a different node and back restores that node's Q&A thread from the DB.
+The Ask-tab AI integration itself (calling `/api/qa`, context, history, inline diagram)
+is already complete from Phase 3 — only DB persistence remains.
+**Done when:** Ask a question on a node → refresh page → thread is still there.
 
 ### Phase 5 — Multi-Model Routing (not started)
 **Goal:** Route tasks to the right model based on complexity.
@@ -194,7 +218,9 @@ User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
 
 ## Current Phase
-**Phase 4 — not started**
+**Phase 3 — complete (with post-phase hardening pass)**
+Next up: Phase 4 (lazy generation + persistence). Phase 4.5 scope reduced to persistence
+only because the Q&A AI call landed during Phase 3.
 
 ## Key Decisions Log
 - React Flow chosen for diagram rendering (rich interactive features, good ecosystem)
@@ -210,3 +236,9 @@ User can jump to any previously visited node. "Reset" button clears the session.
 - `needsDiagram` flag lets AI skip child nodes for simple/self-contained topics
 - Per-node Q&A threads held in `Map<nodeId, Message[]>` in page state (DB persistence in Phase 4.5)
 - Nodes are draggable — positions reset only when a new diagram is generated
+- Q&A AI was implemented during Phase 3 instead of Phase 4.5; only DB persistence remains for 4.5
+- Q&A AI returns `classifications[]` + `offerDiagram` boolean; user must opt in before the inline diagram renders
+- `extractJson` strips optional ```json fences before parsing — Claude occasionally fences despite the prompt
+- All fetches and AI calls have explicit error paths — UI never gets stuck on a network or parse failure
+- Q&A in-flight requests use `AbortController` so switching nodes mid-request cancels cleanly
+- Message ids are `crypto.randomUUID()` — `Date.now()` is not collision-safe under rapid sends
