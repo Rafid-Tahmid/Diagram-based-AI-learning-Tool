@@ -7,6 +7,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Session {
+  id        String   @id
+  topic     String
+  createdAt DateTime @default(now())
+  nodes     Node[]
+}
+
 model Node {
   id          String      @id @default(uuid())
   sessionId   String
@@ -17,6 +24,7 @@ model Node {
   status      String      @default("stub")
   createdAt   DateTime    @default(now())
   qaMessages  QAMessage[]
+  session     Session     @relation(fields: [sessionId], references: [id])
 
   @@index([sessionId])
   @@index([parentId])

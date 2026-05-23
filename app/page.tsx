@@ -93,6 +93,19 @@ async function fetchGenerate(topic: string): Promise<{ sessionId: string; nodes:
   return (json as { data: { sessionId: string; nodes: DbNode[] } }).data
 }
 
+type DbSession = {
+  id: string
+  topic: string
+  createdAt: string
+}
+
+async function fetchSessions(): Promise<DbSession[]> {
+  const res = await fetch('/api/sessions')
+  const json: unknown = await res.json().catch(() => null)
+  if (!res.ok || !json || typeof json !== 'object' || !('data' in json)) return []
+  return (json as { data: DbSession[] }).data
+}
+
 async function fetchExpandNode(nodeId: string): Promise<{ node: DbNode; children: DbNode[] }> {
   const res = await fetch('/api/node', {
     method: 'POST',
@@ -124,6 +137,7 @@ export default function Home() {
   const [nodeMessages, setNodeMessages] = useState<Map<string, Message[]>>(new Map())
   const [expandingNodes, setExpandingNodes] = useState<Set<string>>(new Set())
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set())
+  const [recentSessions, setRecentSessions] = useState<DbSession[]>([])
   const loadedThreadsRef = useRef<Set<string>>(new Set())
   // Mirror of `expandingNodes` for synchronous read-then-write guarding —
   // rapid double-clicks would otherwise both see an empty set and both fire.
@@ -160,6 +174,10 @@ export default function Home() {
             }
           })
       : Promise.resolve()
+
+    fetchSessions().then(sessions => {
+      if (!cancelled) setRecentSessions(sessions)
+    })
 
     work.finally(() => {
       if (!cancelled) setSessionLoading(false)
@@ -254,6 +272,7 @@ export default function Home() {
       const { sessionId, nodes: dbNodes } = await fetchGenerate(topic)
       if (sessionVersionRef.current !== startVersion) return
       localStorage.setItem(SESSION_KEY, sessionId)
+      fetchSessions().then(setRecentSessions)
       const infos = dbNodes.map(dbNodeToInfo)
       setNodes(infos)
       const root = infos.find(n => n.parentId === null)
@@ -268,6 +287,40 @@ export default function Home() {
       if (sessionVersionRef.current === startVersion) setLoading(false)
     }
   }, [inputValue, loading])
+
+  const handleLoadSession = useCallback(async (sessionId: string, topic: string) => {
+    if (loading) return
+    setLoading(true)
+    setError(null)
+    setNodes([])
+    setSelectedNode(null)
+    setNodePath([])
+    setNodeMessages(new Map())
+    setCollapsedNodes(new Set())
+    setExpandingNodes(new Set())
+    loadedThreadsRef.current = new Set()
+    expandingRef.current = new Set()
+    sessionVersionRef.current++
+    const startVersion = sessionVersionRef.current
+    setInputValue(topic)
+    try {
+      const dbNodes = await fetchSession(sessionId)
+      if (sessionVersionRef.current !== startVersion) return
+      localStorage.setItem(SESSION_KEY, sessionId)
+      const infos = dbNodes.map(dbNodeToInfo)
+      setNodes(infos)
+      const root = infos.find(n => n.parentId === null)
+      if (root) {
+        setSelectedNode(root)
+        setNodePath([root])
+      }
+    } catch (err) {
+      if (sessionVersionRef.current !== startVersion) return
+      setError(err instanceof Error ? err.message : 'Failed to load session')
+    } finally {
+      if (sessionVersionRef.current === startVersion) setLoading(false)
+    }
+  }, [loading])
 
   const handleNodeClick = useCallback(async (node: NodeInfo) => {
     setSelectedNode(node)
@@ -399,8 +452,26 @@ export default function Home() {
 
           <div className="flex-1 min-h-0">
             {nodes.length === 0 && !loading && !error && (
-              <div className="flex items-center justify-center h-full">
-                <p className="text-slate-600 text-sm">Type a topic above to get started.</p>
+              <div className="flex flex-col items-center justify-center h-full gap-6">
+                {recentSessions.length === 0 ? (
+                  <p className="text-slate-600 text-sm">Type a topic above to get started.</p>
+                ) : (
+                  <div className="w-full max-w-sm flex flex-col gap-2">
+                    <p className="text-slate-500 text-xs uppercase tracking-widest text-center mb-1">Recent</p>
+                    {recentSessions.map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => handleLoadSession(s.id, s.topic)}
+                        className="flex items-center justify-between px-4 py-2.5 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 rounded-lg text-left transition-colors group"
+                      >
+                        <span className="text-slate-200 text-sm truncate">{s.topic}</span>
+                        <span className="text-slate-600 text-xs shrink-0 ml-3 group-hover:text-slate-400">
+                          {new Date(s.createdAt).toLocaleDateString()}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {loading && (

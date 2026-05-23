@@ -31,6 +31,8 @@ export async function POST(request: Request) {
     const data = await generateNode(rawTopic, '')
 
     const nodes = await prisma.$transaction(async tx => {
+      await tx.session.create({ data: { id: sessionId, topic: rawTopic } })
+
       const root = await tx.node.create({
         data: {
           sessionId,
