@@ -245,12 +245,19 @@ loads the thread; `POST /api/qa` now persists user and assistant messages before
 fetch-once guard); `nodeMessages` Map acts as the in-memory cache. `NodePanel` passes `nodeId` in
 the POST body. Historical messages load with classifications shown inline (no re-offer prompt).
 
-### Phase 5 — Multi-Model Routing (not started)
+### Phase 5 — Multi-Model Routing ✅ COMPLETE
 **Goal:** Route tasks to the right model based on complexity.
 Simple outline/structure tasks → cheap model (GPT-4o-mini or Haiku).
 Deep technical explanations → capable model (Claude Sonnet or GPT-4o).
 Large ancestor context (deep trees) → large context model (Gemini Flash).
 **Done when:** Logs show different models handling different task types.
+**Built:** `lib/router.ts` — `pickModel(RouteInput)` + `promote(ModelChoice)`. Three provider wrappers
+under `lib/providers/` (`anthropic`, `openai`, `gemini`) each exposing a single `callJson()` function.
+`lib/ai.ts` refactored: `generateNode` and `answerQuestion` build a `RouteInput`, call `pickModel`,
+dispatch to the right provider, retry once with `promote()` on error or JSON parse failure, and emit
+a structured `console.log` per call. Routing table: root → Sonnet; expand (depth < 4) → Haiku;
+expand (depth ≥ 4) → Gemini Flash; qa (historyLen < 10) → Sonnet; qa (historyLen ≥ 10) → Gemini Flash.
+Fixed `/api/generate` passing `rawTopic` as its own ancestor — root calls now correctly pass `''`.
 
 ### Phase 6 — RAG / Knowledge Grounding (not started)
 **Goal:** Before generating an explanation, retrieve relevant context chunks from
@@ -264,8 +271,8 @@ User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
 
 ## Current Phase
-**Phase 4.5 — complete**
-Next up: Phase 5 (multi-model routing).
+**Phase 5 — complete**
+Next up: Phase 6 (RAG / knowledge grounding).
 
 ## Key Decisions Log
 - React Flow chosen for diagram rendering (rich interactive features, good ecosystem)
@@ -316,6 +323,10 @@ Next up: Phase 5 (multi-model routing).
 - Threads are lazy-loaded on first node select via a `loadedThreadsRef` fetch-once guard; `nodeMessages` Map is the in-memory cache
 - Historical messages restored with `diagramAccepted: true` if `diagram` field present — no re-offer prompt for old threads
 - Dev server must restart after `prisma db push` — `globalThis.prisma` caches the old client instance across HMR
+- Multi-model router lives in `lib/router.ts`; provider wrappers in `lib/providers/`; `lib/ai.ts` public API is unchanged
+- `pickModel` routes on taskType + depth + historyLen; `promote` upgrades the tier on retry (Haiku → Sonnet, Gemini → Sonnet)
+- `/api/generate` must pass `''` as ancestorPath (not the topic itself) so root calls get `taskType: 'root'` and use Sonnet
+- One structured `console.log` per AI call: ts, taskType, provider, model, depth, historyLen, latencyMs, chars in/out, retried
 
 **Post-Phase-4.5 hardening / bug-fix pass:**
 - `diagramAccepted` is NOT restored on reload — we can't distinguish accepted vs declined from DB; classifications render as info cards only, no auto-diagram

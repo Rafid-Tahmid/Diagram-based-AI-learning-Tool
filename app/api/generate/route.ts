@@ -28,7 +28,7 @@ export async function POST(request: Request) {
 
   try {
     const sessionId = crypto.randomUUID()
-    const data = await generateNode(rawTopic, rawTopic)
+    const data = await generateNode(rawTopic, '')
 
     const nodes = await prisma.$transaction(async tx => {
       const root = await tx.node.create({
