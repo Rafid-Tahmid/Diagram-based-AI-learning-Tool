@@ -16,17 +16,24 @@ export async function GET(request: Request) {
   }
 
   try {
-    const nodes = await prisma.node.findMany({
-      where: { sessionId },
-      // Stub siblings are written in a single createMany and end up with
-      // identical createdAt to ms precision. Adding id as a tiebreaker keeps
-      // the canvas layout stable across refreshes.
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    })
-    if (nodes.length === 0) {
+    const [nodes, session] = await Promise.all([
+      prisma.node.findMany({
+        where: { sessionId },
+        // Stub siblings are written in a single createMany and end up with
+        // identical createdAt to ms precision. Adding id as a tiebreaker keeps
+        // the canvas layout stable across refreshes.
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      }),
+      prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { domain: true, topic: true },
+      }),
+    ])
+    if (nodes.length === 0 || !session) {
       return Response.json({ error: 'Session not found' }, { status: 404 })
     }
-    return Response.json({ data: nodes })
+    const domain = isDomainId(session.domain) ? session.domain : DEFAULT_DOMAIN
+    return Response.json({ data: { nodes, domain, topic: session.topic } })
   } catch (err) {
     console.error('loadSession failed:', err)
     const message = err instanceof Error ? err.message : 'Failed to load session'

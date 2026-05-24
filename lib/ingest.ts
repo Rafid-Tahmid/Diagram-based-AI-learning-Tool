@@ -56,45 +56,53 @@ export async function ingestTopic(topic: string, sources: string[]): Promise<Ing
     }
 
     try {
-      const dbDoc = await prisma.doc.create({
-        data: {
-          source,
-          url: doc.url,
-          title: doc.title,
-          breadcrumb: doc.breadcrumb,
-        },
-      })
+      // Wrap doc + chunk + embedding writes in one transaction so a mid-loop
+      // embedding failure can't leave an unsearchable Doc behind.
+      const dbChunks = await prisma.$transaction(async tx => {
+        const dbDoc = await tx.doc.create({
+          data: {
+            source,
+            url: doc.url,
+            title: doc.title,
+            breadcrumb: doc.breadcrumb,
+          },
+        })
 
-      // Chunk rows don't carry the vector column in Prisma schema (it's raw SQL),
-      // so we insert them via createMany first, then update embeddings one-by-one
-      // using $executeRaw. Not ideal but keeps the schema Prisma-managed.
-      await prisma.chunk.createMany({
-        data: rawChunks.map((c, i) => ({
-          docId: dbDoc.id,
-          ordinal: c.ordinal,
-          content: c.content,
-          isCode: c.isCode,
-          tokens: c.tokens,
-        })),
-      })
+        // Chunk rows don't carry the vector column in Prisma schema (it's raw SQL),
+        // so we insert them via createMany first, then update embeddings one-by-one
+        // using $executeRaw. Not ideal but keeps the schema Prisma-managed.
+        await tx.chunk.createMany({
+          data: rawChunks.map(c => ({
+            docId: dbDoc.id,
+            ordinal: c.ordinal,
+            content: c.content,
+            isCode: c.isCode,
+            tokens: c.tokens,
+          })),
+        })
 
-      const dbChunks = await prisma.chunk.findMany({
-        where: { docId: dbDoc.id },
-        orderBy: { ordinal: 'asc' },
-      })
+        const saved = await tx.chunk.findMany({
+          where: { docId: dbDoc.id },
+          orderBy: { ordinal: 'asc' },
+        })
 
-      for (let i = 0; i < dbChunks.length; i++) {
-        const vec = vectors[i]
-        if (!vec) continue
-        const literal = `[${vec.join(',')}]`
-        await prisma.$executeRaw`
-          UPDATE "Chunk" SET embedding = ${literal}::vector
-          WHERE id = ${dbChunks[i].id}
-        `
-      }
+        for (let i = 0; i < saved.length; i++) {
+          const vec = vectors[i]
+          if (!vec) {
+            throw new Error(`Missing embedding vector for chunk ordinal ${saved[i].ordinal}`)
+          }
+          const literal = `[${vec.join(',')}]`
+          await tx.$executeRaw`
+            UPDATE "Chunk" SET embedding = ${literal}::vector
+            WHERE id = ${saved[i].id}
+          `
+        }
+
+        return saved
+      })
 
       return {
-        chunks: dbChunks.map((c, i) => ({
+        chunks: dbChunks.map(c => ({
           id: c.id,
           docId: c.docId,
           content: c.content,

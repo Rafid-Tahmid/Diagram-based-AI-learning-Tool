@@ -192,6 +192,9 @@ export async function retrieveOrIngest(
   const first = await retrieve({ ...query, sourceFilter: domainSources })
   if (first.groundingViable) return first
 
+  // Without embeddings, ingest would only fetch Wikipedia and fail — skip it.
+  if (!ragConfig.enabled || !ragConfig.embeddingProvider) return first
+
   // Cache miss — ingest the topic from the first working source.
   await ingestTopic(query.topic, domainSources)
 
