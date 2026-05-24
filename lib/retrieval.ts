@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db'
 import { embed } from '@/lib/embeddings'
 import { ragConfig } from '@/lib/ragConfig'
+import { ingestTopic } from '@/lib/ingest'
 
 // Phase 6 — retrieval layer.
 //
@@ -178,4 +179,22 @@ export async function retrieve(query: RetrievalQuery): Promise<RetrievalResult> 
     )
     return EMPTY_RESULT
   }
+}
+
+// JIT retrieval: try the DB first; if no viable grounding found, ingest the
+// topic on-demand from domain sources and re-query. Degrades gracefully at
+// every failure point so the caller always gets a valid (possibly ungrounded)
+// result.
+export async function retrieveOrIngest(
+  query: RetrievalQuery,
+  domainSources: string[],
+): Promise<RetrievalResult> {
+  const first = await retrieve({ ...query, sourceFilter: domainSources })
+  if (first.groundingViable) return first
+
+  // Cache miss — ingest the topic from the first working source.
+  await ingestTopic(query.topic, domainSources)
+
+  // Re-query now that the corpus has content for this topic.
+  return retrieve({ ...query, sourceFilter: domainSources })
 }

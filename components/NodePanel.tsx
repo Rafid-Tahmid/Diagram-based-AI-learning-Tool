@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import dynamic from 'next/dynamic'
 import type { NodeInfo, Message, QAResponse } from '@/lib/types'
+import type { DomainId } from '@/lib/domains'
 
 const QAInlineDiagram = dynamic(() => import('./QAInlineDiagram'), { ssr: false })
 
@@ -13,6 +14,7 @@ type Props = {
   onMessagesChange: (messages: Message[]) => void
   ancestorPath: string
   isExpanding: boolean
+  domain: DomainId
 }
 
 async function fetchAnswer(body: {
@@ -22,6 +24,7 @@ async function fetchAnswer(body: {
   ancestorPath: string
   history: { role: 'user' | 'assistant'; content: string }[]
   question: string
+  domain: DomainId
 }): Promise<QAResponse> {
   const res = await fetch('/api/qa', {
     method: 'POST',
@@ -43,7 +46,7 @@ async function fetchAnswer(body: {
   return (json as { data: QAResponse }).data
 }
 
-export default function NodePanel({ node, onClose, messages, onMessagesChange, ancestorPath, isExpanding }: Props) {
+export default function NodePanel({ node, onClose, messages, onMessagesChange, ancestorPath, isExpanding, domain }: Props) {
   const [activeTab, setActiveTab] = useState<'description' | 'ask'>('description')
   const [input, setInput] = useState('')
   const [isTyping, setIsTyping] = useState(false)
@@ -88,6 +91,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
         ancestorPath,
         history,
         question: text,
+        domain,
       })
 
       const classifications = data.classifications ?? []

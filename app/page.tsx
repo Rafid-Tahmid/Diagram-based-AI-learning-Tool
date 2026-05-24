@@ -5,6 +5,7 @@ import DiagramCanvas from '@/components/DiagramCanvas'
 import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
 import type { NodeInfo, Message, DbNode, QAClassification } from '@/lib/types'
+import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
 
 const SESSION_KEY = 'diagram-learning-session'
 
@@ -73,11 +74,11 @@ async function fetchSession(sessionId: string): Promise<DbNode[]> {
   return (json as { data: DbNode[] }).data
 }
 
-async function fetchGenerate(topic: string): Promise<{ sessionId: string; nodes: DbNode[] }> {
+async function fetchGenerate(topic: string, domain: DomainId): Promise<{ sessionId: string; nodes: DbNode[] }> {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic }),
+    body: JSON.stringify({ topic, domain }),
   })
   const json: unknown = await res.json().catch(() => null)
   if (!res.ok) {
@@ -96,6 +97,7 @@ async function fetchGenerate(topic: string): Promise<{ sessionId: string; nodes:
 type DbSession = {
   id: string
   topic: string
+  domain: string
   createdAt: string
 }
 
@@ -106,11 +108,11 @@ async function fetchSessions(): Promise<DbSession[]> {
   return (json as { data: DbSession[] }).data
 }
 
-async function fetchExpandNode(nodeId: string): Promise<{ node: DbNode; children: DbNode[] }> {
+async function fetchExpandNode(nodeId: string, domain: DomainId): Promise<{ node: DbNode; children: DbNode[] }> {
   const res = await fetch('/api/node', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nodeId }),
+    body: JSON.stringify({ nodeId, domain }),
   })
   const json: unknown = await res.json().catch(() => null)
   if (!res.ok) {
@@ -128,6 +130,7 @@ async function fetchExpandNode(nodeId: string): Promise<{ node: DbNode; children
 
 export default function Home() {
   const [inputValue, setInputValue] = useState('')
+  const [domain, setDomain] = useState<DomainId>(DEFAULT_DOMAIN)
   const [nodes, setNodes] = useState<NodeInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [sessionLoading, setSessionLoading] = useState(true)
@@ -289,7 +292,7 @@ export default function Home() {
     const startVersion = sessionVersionRef.current
 
     try {
-      const { sessionId, nodes: dbNodes } = await fetchGenerate(topic)
+      const { sessionId, nodes: dbNodes } = await fetchGenerate(topic, domain)
       if (sessionVersionRef.current !== startVersion) return
       localStorage.setItem(SESSION_KEY, sessionId)
       fetchSessions().then(setRecentSessions)
@@ -308,7 +311,7 @@ export default function Home() {
     }
   }, [inputValue, loading])
 
-  const handleLoadSession = useCallback(async (sessionId: string, topic: string) => {
+  const handleLoadSession = useCallback(async (sessionId: string, topic: string, sessionDomain: DomainId = DEFAULT_DOMAIN) => {
     if (loading) return
     setLoading(true)
     setError(null)
@@ -323,6 +326,7 @@ export default function Home() {
     sessionVersionRef.current++
     const startVersion = sessionVersionRef.current
     setInputValue(topic)
+    setDomain(sessionDomain)
     try {
       const dbNodes = await fetchSession(sessionId)
       if (sessionVersionRef.current !== startVersion) return
@@ -372,7 +376,7 @@ export default function Home() {
     const startVersion = sessionVersionRef.current
 
     try {
-      const { node: updatedDb, children } = await fetchExpandNode(node.id)
+      const { node: updatedDb, children } = await fetchExpandNode(node.id, domain)
       // Session changed mid-flight (new topic submitted) — discard so we
       // don't insert orphan children into an unrelated session.
       if (sessionVersionRef.current !== startVersion) return
@@ -450,7 +454,7 @@ export default function Home() {
                   {recentSessions.map(s => (
                     <li key={s.id}>
                       <button
-                        onClick={() => { handleLoadSession(s.id, s.topic); setShowHistory(false) }}
+                        onClick={() => { handleLoadSession(s.id, s.topic, isDomainId(s.domain) ? s.domain : DEFAULT_DOMAIN); setShowHistory(false) }}
                         className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-slate-800 transition-colors group"
                       >
                         <span className="text-slate-200 text-sm truncate mr-3">{s.topic}</span>
@@ -476,23 +480,41 @@ export default function Home() {
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 min-w-0 flex flex-col">
 
-          <div className="px-6 py-3 border-b border-slate-800 shrink-0 flex gap-3">
-            <input
-              type="text"
-              value={inputValue}
-              onChange={e => setInputValue(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-              placeholder="Enter any topic to explore…"
-              disabled={loading}
-              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
-            />
-            <button
-              onClick={handleSubmit}
-              disabled={!inputValue.trim() || loading}
-              className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors shrink-0"
-            >
-              {loading ? 'Generating…' : 'Explore'}
-            </button>
+          <div className="px-6 pt-3 pb-2 border-b border-slate-800 shrink-0 flex flex-col gap-2">
+            <div className="flex gap-1.5 flex-wrap">
+              {(Object.entries(DOMAINS) as [DomainId, typeof DOMAINS[DomainId]][]).map(([id, cfg]) => (
+                <button
+                  key={id}
+                  onClick={() => setDomain(id)}
+                  disabled={loading}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors disabled:opacity-50 ${
+                    domain === id
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+                  }`}
+                >
+                  {cfg.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={e => setInputValue(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+                placeholder="Enter any topic to explore…"
+                disabled={loading}
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
+              />
+              <button
+                onClick={handleSubmit}
+                disabled={!inputValue.trim() || loading}
+                className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors shrink-0"
+              >
+                {loading ? 'Generating…' : 'Explore'}
+              </button>
+            </div>
           </div>
 
           {error && (
@@ -519,7 +541,7 @@ export default function Home() {
                     {recentSessions.map(s => (
                       <button
                         key={s.id}
-                        onClick={() => handleLoadSession(s.id, s.topic)}
+                        onClick={() => handleLoadSession(s.id, s.topic, isDomainId(s.domain) ? s.domain : DEFAULT_DOMAIN)}
                         className="flex items-center justify-between px-4 py-2.5 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 rounded-lg text-left transition-colors group"
                       >
                         <span className="text-slate-200 text-sm truncate">{s.topic}</span>
@@ -562,6 +584,7 @@ export default function Home() {
             onMessagesChange={msgs => handleMessagesChange(selectedNode.id, msgs)}
             ancestorPath={nodePath.map(n => n.label).join(' > ')}
             isExpanding={expandingNodes.has(selectedNode.id)}
+            domain={domain}
           />
         )}
       </div>

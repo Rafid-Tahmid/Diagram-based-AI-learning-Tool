@@ -1,5 +1,6 @@
 import { generateNode } from '@/lib/ai'
 import { prisma } from '@/lib/db'
+import { isDomainId, DEFAULT_DOMAIN } from '@/lib/domains'
 
 // Sentinel for the lost-race case in the expand transaction. Thrown inside
 // the prisma.$transaction callback so the entire transaction rolls back,
@@ -41,10 +42,10 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const nodeId =
-    typeof body === 'object' && body !== null && typeof (body as { nodeId?: unknown }).nodeId === 'string'
-      ? (body as { nodeId: string }).nodeId
-      : ''
+  const b = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {}
+  const nodeId = typeof b.nodeId === 'string' ? b.nodeId : ''
+  const rawDomain = typeof b.domain === 'string' ? b.domain : DEFAULT_DOMAIN
+  const domain = isDomainId(rawDomain) ? rawDomain : DEFAULT_DOMAIN
 
   if (!nodeId) {
     return Response.json({ error: 'nodeId is required' }, { status: 400 })
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
     }
 
     const ancestorPath = await buildAncestorPath(nodeId, target.sessionId)
-    const data = await generateNode(target.title, ancestorPath)
+    const data = await generateNode(target.title, ancestorPath, domain)
 
     // Wrap the stub→generated update, child stub creation, and child reload
     // in a single transaction so a half-expanded state can never escape:

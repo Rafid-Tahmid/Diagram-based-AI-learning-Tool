@@ -1,5 +1,6 @@
 import { generateNode } from '@/lib/ai'
 import { prisma } from '@/lib/db'
+import { isDomainId, DEFAULT_DOMAIN } from '@/lib/domains'
 
 const MAX_TOPIC_LENGTH = 200
 
@@ -11,10 +12,10 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const rawTopic =
-    typeof body === 'object' && body !== null && typeof (body as { topic?: unknown }).topic === 'string'
-      ? (body as { topic: string }).topic.trim()
-      : ''
+  const b = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {}
+  const rawTopic = typeof b.topic === 'string' ? b.topic.trim() : ''
+  const rawDomain = typeof b.domain === 'string' ? b.domain : DEFAULT_DOMAIN
+  const domain = isDomainId(rawDomain) ? rawDomain : DEFAULT_DOMAIN
 
   if (!rawTopic) {
     return Response.json({ error: 'Topic is required' }, { status: 400 })
@@ -28,10 +29,10 @@ export async function POST(request: Request) {
 
   try {
     const sessionId = crypto.randomUUID()
-    const data = await generateNode(rawTopic, '')
+    const data = await generateNode(rawTopic, '', domain)
 
     const nodes = await prisma.$transaction(async tx => {
-      await tx.session.create({ data: { id: sessionId, topic: rawTopic } })
+      await tx.session.create({ data: { id: sessionId, topic: rawTopic, domain } })
 
       const root = await tx.node.create({
         data: {

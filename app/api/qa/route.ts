@@ -1,5 +1,6 @@
 import { answerQuestion } from '@/lib/ai'
 import { prisma } from '@/lib/db'
+import { isDomainId, DEFAULT_DOMAIN, type DomainId } from '@/lib/domains'
 
 type QABody = {
   nodeId: string
@@ -8,6 +9,7 @@ type QABody = {
   ancestorPath: string
   history: { role: 'user' | 'assistant'; content: string }[]
   question: string
+  domain: DomainId
 }
 
 function validateBody(raw: unknown): QABody | null {
@@ -35,6 +37,7 @@ function validateBody(raw: unknown): QABody | null {
     ancestorPath: b.ancestorPath,
     history,
     question: b.question,
+    domain: typeof b.domain === 'string' && isDomainId(b.domain) ? b.domain : DEFAULT_DOMAIN,
   }
 }
 
@@ -82,7 +85,8 @@ export async function POST(request: Request) {
       body.nodeDescription ?? '',
       body.ancestorPath,
       body.history,
-      body.question
+      body.question,
+      body.domain,
     )
 
     // Persist user + assistant atomically — half-written threads on a

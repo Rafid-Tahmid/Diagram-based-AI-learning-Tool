@@ -10,8 +10,9 @@ import {
 import { callJson as anthropicCall } from '@/lib/providers/anthropic'
 import { callJson as openaiCall } from '@/lib/providers/openai'
 import { callJson as geminiCall } from '@/lib/providers/gemini'
-import { retrieve, type RetrievedChunk } from '@/lib/retrieval'
+import { retrieveOrIngest, type RetrievedChunk } from '@/lib/retrieval'
 import { ragConfig } from '@/lib/ragConfig'
+import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
 
 const MAX_TOKENS_GENERATE = 1024
 const MAX_TOKENS_QA = 2048
@@ -218,18 +219,19 @@ Context: ${ancestorPath}
 Topic: ${title}`
 }
 
-export async function generateNode(title: string, ancestorPath: string): Promise<GenerateResponse> {
+export async function generateNode(title: string, ancestorPath: string, domain: DomainId = DEFAULT_DOMAIN): Promise<GenerateResponse> {
   // taskType is inferred from ancestorPath: empty string means this is a
   // root call (a brand-new session), anything else is an expansion.
   // /api/generate must pass `''` for root — see route comment there.
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
   const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
+  const domainSources = DOMAINS[isDomainId(domain) ? domain : DEFAULT_DOMAIN].sources
 
   // Root skips retrieval — it's a taxonomy/structure task and we don't have a
   // narrow topic to embed against beyond the user's raw input.
   const retrieval =
     taskType === 'expand' && ragConfig.enabled
-      ? await retrieve({ topic: title, ancestorPath })
+      ? await retrieveOrIngest({ topic: title, ancestorPath }, domainSources)
       : { chunks: [], topScore: 0, groundingViable: false }
 
   const grounded = retrieval.groundingViable
@@ -344,11 +346,13 @@ export async function answerQuestion(
   ancestorPath: string,
   history: { role: 'user' | 'assistant'; content: string }[],
   question: string,
+  domain: DomainId = DEFAULT_DOMAIN,
 ): Promise<QAResponse> {
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
+  const domainSources = DOMAINS[isDomainId(domain) ? domain : DEFAULT_DOMAIN].sources
 
   const retrieval = ragConfig.enabled
-    ? await retrieve({ topic: question, ancestorPath })
+    ? await retrieveOrIngest({ topic: question, ancestorPath }, domainSources)
     : { chunks: [], topScore: 0, groundingViable: false }
 
   const grounded = retrieval.groundingViable

@@ -10,6 +10,7 @@ datasource db {
 model Session {
   id        String   @id
   topic     String
+  domain    String   @default("general")
   createdAt DateTime @default(now())
   nodes     Node[]
 }
