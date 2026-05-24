@@ -147,3 +147,18 @@ Detailed notes on what was built in each phase, including hardening passes and b
 **Remaining:**
 - Eval harness (`scripts/eval/`) measuring grounded vs ungrounded accuracy
 - MDN fetcher (`lib/sources/mdn.ts`) — currently a stub that falls back to Wikipedia
+
+---
+
+## Phase 7 — Cloud DB Migration ✅
+**Goal:** Replace local Docker Postgres with Neon so anyone cloning the repo needs only a connection string.
+**Built:**
+- Neon project (Postgres 17 + pgvector built-in) replaces `pgvector/pgvector:pg16` Docker container
+- `DATABASE_URL` updated in `.env` and `.env.local` — zero code changes
+- `npx prisma db push` applied schema to Neon
+- pgvector SQL (`CREATE EXTENSION IF NOT EXISTS vector; ALTER TABLE "Chunk" ADD COLUMN IF NOT EXISTS embedding vector(3072)`) run via Neon SQL Editor
+- README rewritten: Neon setup, correct versions (Next.js 16, Tailwind 4), clean scripts table
+
+**UX fixes (same commit):**
+- Removed `+` badge from stub nodes — dashed border is sufficient hint
+- Clicking the whole node body now toggles collapse/expand for generated nodes with children (previously only the small chevron button worked)

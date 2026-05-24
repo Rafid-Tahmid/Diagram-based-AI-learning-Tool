@@ -7,7 +7,7 @@ Architectural and design decisions made during development. Read this when you n
 - Next.js App Router for unified frontend + backend — no separate server
 - PostgreSQL + Prisma 5 for the knowledge tree — adjacency list pattern with parentId. Pinned to Prisma 5; Prisma 7 has breaking changes (no `url` in schema datasource)
 - Prisma CLI reads from `.env`, not `.env.local`; both files must have `DATABASE_URL`
-- Docker image is `pgvector/pgvector:pg16` (not plain `postgres:16`) — required for the vector extension
+- Production DB is Neon (PostgreSQL 17 + pgvector built-in) — drop-in `DATABASE_URL` swap, zero code changes. Local Docker (`pgvector/pgvector:pg16`) still works for offline dev
 - pgvector chosen over a separate vector DB — keeps infra to one Postgres container. The `vector` column type isn't supported natively by Prisma 5, so raw SQL is used for vector ops
 - Raw SQL quarantined to `lib/retrieval.ts` and `prisma/sql/*` only — deliberate exception to the no-raw-SQL rule; `lib/retrieval.ts` is a storage adapter and callers see only typed TypeScript
 - `lib/db.ts` uses `globalThis` (cross-runtime safe). Dev server must restart after `prisma db push` — `globalThis.prisma` caches the old client instance across HMR
@@ -27,7 +27,7 @@ Architectural and design decisions made during development. Read this when you n
 - DiagramCanvas preserves dragged positions across expands via a `knownIdsRef` — only newly-appearing nodes get a layout-computed starting position
 - Node interaction is split for predictability: a plain click **selects** the node (opens its panel) and generates children if it's a stub; a separate **chevron toggle** on the node collapses/expands that subtree. Reading a node never hides it. (Replaced the earlier "focus mode" — `focusedNodeId` + `branchMemory` + `navigateGeneratedNode` — which hid sibling branches and overloaded one click with five behaviors; users found it unpredictable.)
 - Collapse is a client-side display filter (`collapsedNodes` Set → `visibleNodes` hides any node with a collapsed ancestor) over data already in state — re-expanding never calls the AI; siblings stay visible; not persisted (loads fully expanded on refresh)
-- Stub nodes show a small `+` badge (top-right) hinting they expand on click; nodes with children show a chevron toggle at the bottom edge (down + child count when collapsed, up when expanded). The toggle `stopPropagation`s so it doesn't also select the node
+- Stub nodes have a dashed border to hint they're expandable; no badge. Nodes with children show a chevron toggle at the bottom edge (child count when collapsed, up-arrow when expanded). Clicking the whole node body also toggles collapse for generated nodes with children — the chevron `stopPropagation`s to avoid double-firing
 - Breadcrumb navigation un-collapses all ancestors of the target so it's always brought into view
 - `NodeInfo` carries `status`, `parentId`, and `hasDiagram`; edges are derived from nodes, not stored separately
 
