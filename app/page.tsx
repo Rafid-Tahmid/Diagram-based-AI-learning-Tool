@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import DiagramCanvas from '@/components/DiagramCanvas'
 import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
+import SidebarTree from '@/components/SidebarTree'
 import type { NodeInfo, Message, DbNode, QAClassification } from '@/lib/types'
 import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
 
@@ -464,6 +465,37 @@ export default function Home() {
     setNodePath([])
   }, [])
 
+  const handleReset = useCallback(() => {
+    localStorage.removeItem(SESSION_KEY)
+    sessionVersionRef.current++
+    loadedThreadsRef.current = new Set()
+    expandingRef.current = new Set()
+    setNodes([])
+    setSelectedNode(null)
+    setNodePath([])
+    setNodeMessages(new Map())
+    setCollapsedNodes(new Set())
+    setExpandingNodes(new Set())
+    setError(null)
+    setInputValue('')
+  }, [])
+
+  const handleSidebarNodeSelect = useCallback((node: NodeInfo) => {
+    // Un-collapse all ancestors so the node is visible on the canvas.
+    setCollapsedNodes(prev => {
+      if (prev.size === 0) return prev
+      const byId = new Map(nodes.map(n => [n.id, n]))
+      const next = new Set(prev)
+      let ancestor = node.parentId ? byId.get(node.parentId) : undefined
+      while (ancestor) {
+        next.delete(ancestor.id)
+        ancestor = ancestor.parentId ? byId.get(ancestor.parentId) : undefined
+      }
+      return next.size === prev.size ? prev : next
+    })
+    handleNodeClick(node)
+  }, [nodes, handleNodeClick])
+
   const handleMessagesChange = useCallback((nodeId: string, messages: Message[]) => {
     setNodeMessages(prev => new Map(prev).set(nodeId, messages))
   }, [])
@@ -483,6 +515,18 @@ export default function Home() {
         <h1 className="text-slate-100 font-semibold text-sm tracking-wide flex-1">
           Diagram Learning
         </h1>
+        {nodes.length > 0 && (
+          <button
+            onClick={handleReset}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
+            aria-label="New topic"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            New topic
+          </button>
+        )}
         <div ref={historyRef} className="relative">
           <button
             onClick={() => setShowHistory(v => !v)}
@@ -496,11 +540,11 @@ export default function Home() {
           </button>
           {showHistory && (
             <div className="absolute right-0 top-full mt-1 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden">
-              <p className="px-4 py-2.5 text-xs text-slate-500 uppercase tracking-widest border-b border-slate-800">
+              <p className="px-4 py-2.5 text-xs text-slate-400 uppercase tracking-widest border-b border-slate-800">
                 Recent sessions
               </p>
               {recentSessions.length === 0 ? (
-                <p className="px-4 py-4 text-sm text-slate-600 text-center">No sessions yet.</p>
+                <p className="px-4 py-4 text-sm text-slate-500 text-center">No sessions yet.</p>
               ) : (
                 <ul className="max-h-72 overflow-y-auto">
                   {recentSessions.map(s => (
@@ -510,7 +554,7 @@ export default function Home() {
                         className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-slate-800 transition-colors group"
                       >
                         <span className="text-slate-200 text-sm truncate mr-3">{s.topic}</span>
-                        <span className="text-slate-600 text-xs shrink-0 group-hover:text-slate-400">
+                        <span className="text-slate-500 text-xs shrink-0 group-hover:text-slate-300">
                           {new Date(s.createdAt).toLocaleDateString()}
                         </span>
                       </button>
@@ -530,6 +574,12 @@ export default function Home() {
       )}
 
       <div className="flex flex-1 min-h-0">
+        <SidebarTree
+          nodes={nodes}
+          selectedNodeId={selectedNode?.id ?? null}
+          collapsedNodeIds={collapsedNodes}
+          onNodeSelect={handleSidebarNodeSelect}
+        />
         <div className="flex-1 min-w-0 flex flex-col">
 
           <div className="px-6 pt-3 pb-2 border-b border-slate-800 shrink-0 flex flex-col gap-2">
@@ -586,10 +636,10 @@ export default function Home() {
             {nodes.length === 0 && !loading && !error && (
               <div className="flex flex-col items-center justify-center h-full gap-6">
                 {recentSessions.length === 0 ? (
-                  <p className="text-slate-600 text-sm">Type a topic above to get started.</p>
+                  <p className="text-slate-400 text-sm">Type a topic above to get started.</p>
                 ) : (
                   <div className="w-full max-w-sm flex flex-col gap-2">
-                    <p className="text-slate-500 text-xs uppercase tracking-widest text-center mb-1">Recent</p>
+                    <p className="text-slate-400 text-xs uppercase tracking-widest text-center mb-1">Recent</p>
                     {recentSessions.map(s => (
                       <button
                         key={s.id}
@@ -597,7 +647,7 @@ export default function Home() {
                         className="flex items-center justify-between px-4 py-2.5 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 rounded-lg text-left transition-colors group"
                       >
                         <span className="text-slate-200 text-sm truncate">{s.topic}</span>
-                        <span className="text-slate-600 text-xs shrink-0 ml-3 group-hover:text-slate-400">
+                        <span className="text-slate-500 text-xs shrink-0 ml-3 group-hover:text-slate-300">
                           {new Date(s.createdAt).toLocaleDateString()}
                         </span>
                       </button>

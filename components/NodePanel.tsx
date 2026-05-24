@@ -134,7 +134,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
         <h2 className="text-slate-100 font-semibold text-sm truncate pr-4">{node.label}</h2>
         <button
           onClick={onClose}
-          className="text-slate-500 hover:text-slate-200 transition-colors text-lg leading-none shrink-0"
+          className="text-slate-400 hover:text-slate-100 transition-colors text-lg leading-none shrink-0"
           aria-label="Close panel"
         >
           ×
@@ -149,7 +149,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
             className={`flex-1 py-2.5 text-xs font-semibold tracking-widest uppercase transition-colors ${
               activeTab === tab
                 ? 'text-indigo-400 border-b-2 border-indigo-500'
-                : 'text-slate-500 hover:text-slate-300'
+                : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             {tab === 'description' ? 'Description' : `Ask${questionCount > 0 ? ` (${questionCount})` : ''}`}
@@ -167,7 +167,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
           ) : node.description ? (
             <p className="text-slate-300 text-sm leading-relaxed">{node.description}</p>
           ) : (
-            <p className="text-slate-500 text-sm leading-relaxed italic">
+            <p className="text-slate-400 text-sm leading-relaxed italic">
               Click this node to generate its content.
             </p>
           )}
@@ -178,12 +178,12 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
         <div className="flex flex-col flex-1 min-h-0">
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
             {messages.length === 0 && !isTyping && !isExpanding && (
-              <p className="text-slate-600 text-xs text-center mt-6">
+              <p className="text-slate-500 text-xs text-center mt-6">
                 Ask anything about {node.label}
               </p>
             )}
             {messages.length === 0 && isExpanding && (
-              <p className="text-slate-600 text-xs text-center mt-6">
+              <p className="text-slate-500 text-xs text-center mt-6">
                 Generating description… ask once it&apos;s ready.
               </p>
             )}
@@ -286,7 +286,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
                 onKeyDown={e => e.key === 'Enter' && handleSend()}
                 placeholder={isExpanding ? 'Waiting for description…' : `Ask about ${node.label}...`}
                 disabled={isTyping || isExpanding}
-                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors disabled:opacity-50"
               />
               <button
                 onClick={handleSend}

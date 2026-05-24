@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
 :root {
+  color-scheme: dark;
   --background: #020617;
-  --foreground: #ededed;
+  --foreground: #e6edf6;
 }
 
 @theme inline {
@@ -12,8 +13,45 @@
   --font-mono: var(--font-geist-mono);
 }
 
+html {
+  color-scheme: dark;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Dark scrollbars so native UI matches the theme instead of rendering light. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #475569 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+  background-clip: padding-box;
+}
+
+/* Keep autofilled inputs dark — the browser's default light-yellow fill makes
+   the foreground text invisible against the dark theme. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #e6edf6;
+  -webkit-box-shadow: 0 0 0 1000px #1e293b inset;
+  caret-color: #e6edf6;
 }
