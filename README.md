@@ -106,5 +106,8 @@ The app works with only `ANTHROPIC_API_KEY` — RAG degrades gracefully to ungro
 | `npm run build` | Production build |
 | `npm run start` | Serve the production build |
 | `npm run lint` | ESLint |
+| `npm run test` | Run Vitest in watch mode |
+| `npm run test:run` | Run all unit tests once |
+| `npm run test:coverage` | Run tests with coverage report |
 | `npx prisma db push` | Apply schema changes to the database |
 | `npx prisma studio` | Open the DB browser |

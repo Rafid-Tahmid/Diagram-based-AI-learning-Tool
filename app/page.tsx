@@ -6,6 +6,7 @@ import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
 import SidebarTree from '@/components/SidebarTree'
 import type { NodeInfo, Message, DbNode, QAClassification } from '@/lib/types'
+import { buildPath, hasCollapsedAncestor, removeFromSet, addToSet } from '@/lib/treeUtils'
 import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
 
 const SESSION_KEY = 'diagram-learning-session'
@@ -52,44 +53,6 @@ function dbMsgToMessage(row: DbQAMessage): Message {
     offerDiagram: false,
     diagramAccepted: false,
   }
-}
-
-function buildPath(targetId: string, allNodes: NodeInfo[]): NodeInfo[] {
-  const nodeMap = new Map(allNodes.map(n => [n.id, n]))
-  const path: NodeInfo[] = []
-  let current = nodeMap.get(targetId)
-  while (current) {
-    path.unshift(current)
-    current = current.parentId ? nodeMap.get(current.parentId) : undefined
-  }
-  return path
-}
-
-function hasCollapsedAncestor(
-  node: NodeInfo,
-  collapsedNodes: Set<string>,
-  byId: Map<string, NodeInfo>,
-): boolean {
-  let current = node.parentId ? byId.get(node.parentId) : undefined
-  while (current) {
-    if (collapsedNodes.has(current.id)) return true
-    current = current.parentId ? byId.get(current.parentId) : undefined
-  }
-  return false
-}
-
-function removeFromSet(set: Set<string>, id: string): Set<string> {
-  if (!set.has(id)) return set
-  const next = new Set(set)
-  next.delete(id)
-  return next
-}
-
-function addToSet(set: Set<string>, id: string): Set<string> {
-  if (set.has(id)) return set
-  const next = new Set(set)
-  next.add(id)
-  return next
 }
 
 class SessionMissingError extends Error {

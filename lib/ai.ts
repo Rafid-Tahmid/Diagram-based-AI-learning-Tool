@@ -11,6 +11,7 @@ import { callJson as anthropicCall } from '@/lib/providers/anthropic'
 import { callJson as openaiCall } from '@/lib/providers/openai'
 import { callJson as geminiCall } from '@/lib/providers/gemini'
 import { retrieveOrIngest, type RetrievedChunk } from '@/lib/retrieval'
+import { parseJson } from '@/lib/jsonUtils'
 import { ragConfig } from '@/lib/ragConfig'
 import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
 
@@ -96,25 +97,6 @@ async function withRetry<T>(
       if (secondErr instanceof Error) (wrapped as Error & { cause?: unknown }).cause = secondErr
       throw wrapped
     }
-  }
-}
-
-// ─── JSON helpers ─────────────────────────────────────────────────────────────
-
-function extractJson(raw: string): string {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (fenced) return fenced[1].trim()
-  const first = raw.indexOf('{')
-  const last = raw.lastIndexOf('}')
-  if (first !== -1 && last > first) return raw.slice(first, last + 1).trim()
-  return raw.trim()
-}
-
-function parseJson<T>(raw: string): T {
-  try {
-    return JSON.parse(extractJson(raw)) as T
-  } catch {
-    throw new Error(`Model returned non-JSON: ${raw.slice(0, 200)}`)
   }
 }
 
