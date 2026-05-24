@@ -375,7 +375,35 @@ swappable via config without touching call sites.
 - Eval harness — Stage 5.
 - Model-tier downgrade flip (`RAG_TIER=cheap`) — Stage 6, gated on Stage 5 eval results.
 
-### Phase 7 — Navigation Polish (not started)
+### Phase 7 — Cloud Database Migration (not started)
+**Goal:** Move from local Docker Postgres to a shared cloud database (Neon) so anyone
+cloning the repo can use the app without running a local DB, and the RAG corpus
+accumulates across all users automatically.
+**Done when:** `DATABASE_URL` points to Neon; `npx prisma db push` + pgvector SQL run
+against Neon; local Docker container no longer required; README documents the new setup.
+
+**Plan:**
+1. Create a free Neon project at [neon.tech](https://neon.tech)
+2. Copy the connection string from the Neon dashboard
+3. Update `.env` and `.env.local` to point `DATABASE_URL` to the Neon connection string
+4. Run `npx prisma db push` against Neon to create all tables
+5. Run `prisma/sql/001_pgvector.sql` against Neon — pgvector is a built-in extension,
+   so `CREATE EXTENSION vector` works without any extra setup
+6. Commit any env-variable documentation changes (never commit the key itself)
+7. Update the README with the new setup steps
+
+**Why Neon over AWS RDS:**
+- Free tier (0.5 GB) is plenty for a demo / testing corpus
+- pgvector is supported natively — no image changes, no manual installs
+- Serverless — scales to zero when idle, no ongoing cost for a dev project
+- Connection string is a drop-in replacement for `DATABASE_URL`; zero code changes
+
+**Local dev after migration:**
+The Docker container (`pgvector/pgvector:pg16`) can still be used for fully offline
+development by swapping `DATABASE_URL` back to `localhost:5432`. Both work identically
+because the schema and SQL migration are the same.
+
+### Phase 9 — Navigation Polish (not started)
 **Goal:** Sidebar tree showing the full explored hierarchy. Breadcrumb is clickable.
 User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
