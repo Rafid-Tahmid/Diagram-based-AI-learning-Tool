@@ -1,9 +1,16 @@
+import { ragConfig } from '@/lib/ragConfig'
+
 export type TaskType = 'root' | 'expand' | 'qa'
 
 export type RouteInput = {
   taskType: TaskType
   depth: number
   historyLen: number
+  // True when retrieval succeeded and groundingViable is set. Lets the router
+  // drop to a cheaper tier under ragConfig.tier='cheap' because the retrieved
+  // chunks do the recall work that the bigger model would otherwise do from
+  // parametric memory. Defaults to false → existing ungrounded routing.
+  grounded?: boolean
 }
 
 export type ModelChoice = {
@@ -21,34 +28,46 @@ export type ProviderCallArgs = {
   timeoutMs?: number
 }
 
+const SONNET: ModelChoice = { provider: 'anthropic', model: 'claude-sonnet-4-6' }
+const HAIKU: ModelChoice = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }
+const FLASH: ModelChoice = { provider: 'google', model: 'gemini-2.0-flash' }
+
 export function pickModel(input: RouteInput): ModelChoice {
   switch (input.taskType) {
     case 'root':
       // First impression — quality matters more than cost; one call per session.
-      return { provider: 'anthropic', model: 'claude-sonnet-4-6' }
+      // Root skips retrieval (taxonomy task), so `grounded` is irrelevant here.
+      return SONNET
 
     case 'expand':
-      // Deep trees have long ancestor paths; Gemini Flash handles large context cheaply.
-      if (input.depth >= 4) return { provider: 'google', model: 'gemini-2.0-flash' }
-      // Shallow expansion is structural (titles + short description); Haiku is plenty.
-      return { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }
+      // Expand routing is structural in either tier. The choice between Haiku
+      // and Flash is driven by ancestor-path length, not by grounding — even
+      // when ragConfig.tier='cheap'.
+      if (input.depth >= 4) return FLASH
+      return HAIKU
 
     case 'qa':
-      // Long threads accumulate tokens fast; route to the large-context model.
-      if (input.historyLen >= 10) return { provider: 'google', model: 'gemini-2.0-flash' }
-      // Free-form Q&A needs nuanced, conversational answers.
-      return { provider: 'anthropic', model: 'claude-sonnet-4-6' }
+      // Q&A is the call where ragConfig.tier and `grounded` actually matter.
+      //
+      // - baseline + grounded:    Sonnet sees the chunks (pure accuracy win, Stage 1)
+      // - baseline + ungrounded:  Sonnet as today
+      // - cheap + grounded:       Haiku/Flash — chunks do the recall (Stage 2)
+      // - cheap + ungrounded:     fall back to Sonnet so a retrieval miss doesn't
+      //                           land on a small model with no grounding
+      if (ragConfig.tier === 'cheap' && input.grounded) {
+        // Long history is still cheaper on Flash than Haiku, and Flash has
+        // more headroom for the combined chunks + history payload.
+        return input.historyLen >= 10 ? FLASH : HAIKU
+      }
+      if (input.historyLen >= 10) return FLASH
+      return SONNET
   }
 }
 
 // On retry: promote to the next stronger tier. If already on Sonnet, bubble the error.
 export function promote(choice: ModelChoice): ModelChoice {
-  if (choice.model === 'claude-haiku-4-5-20251001') {
-    return { provider: 'anthropic', model: 'claude-sonnet-4-6' }
-  }
-  if (choice.provider === 'google') {
-    return { provider: 'anthropic', model: 'claude-sonnet-4-6' }
-  }
+  if (choice.model === HAIKU.model) return SONNET
+  if (choice.provider === 'google') return SONNET
   return choice
 }
 

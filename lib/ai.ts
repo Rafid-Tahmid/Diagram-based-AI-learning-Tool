@@ -1,4 +1,4 @@
-import type { GenerateResponse, QAResponse } from '@/lib/types'
+import type { GenerateResponse, QAResponse, Source, Confidence } from '@/lib/types'
 import {
   pickModel,
   promote,
@@ -10,6 +10,8 @@ import {
 import { callJson as anthropicCall } from '@/lib/providers/anthropic'
 import { callJson as openaiCall } from '@/lib/providers/openai'
 import { callJson as geminiCall } from '@/lib/providers/gemini'
+import { retrieve, type RetrievedChunk } from '@/lib/retrieval'
+import { ragConfig } from '@/lib/ragConfig'
 
 const MAX_TOKENS_GENERATE = 1024
 const MAX_TOKENS_QA = 2048
@@ -18,6 +20,10 @@ const REQUEST_TIMEOUT_MS = 60_000
 // Jittered to avoid lockstep retries across concurrent requests.
 const RETRY_BACKOFF_BASE_MS = 200
 const RETRY_BACKOFF_JITTER_MS = 200
+
+// Used as the explicit confidence-retry target. Separate from withRetry's
+// promote() chain — that's for transient errors, this is for quality fallback.
+const SONNET_FALLBACK: ModelChoice = { provider: 'anthropic', model: 'claude-sonnet-4-6' }
 
 // Per-provider env-var assertions are now made lazily inside each provider's
 // `callJson`. Asserting them at module load forced the entire app to depend
@@ -115,6 +121,45 @@ function parseJson<T>(raw: string): T {
   }
 }
 
+// ─── source / grounding helpers ──────────────────────────────────────────────
+
+// Build the "Reference sources" block that gets prepended to the prompt.
+// Returns "" when chunks is empty so callers can blindly concatenate.
+function formatSourcesBlock(chunks: RetrievedChunk[]): string {
+  if (chunks.length === 0) return ''
+  const lines = chunks.map((c, i) => `[${i + 1}] ${c.breadcrumb}\n${c.content}`)
+  return `\n\nReference sources (cite by [n] in your answer):\n${lines.join('\n\n')}`
+}
+
+// Instruction appended to the JSON schema when grounding is active. Tells the
+// model to inline [n] citations and self-flag confidence so we can promote to
+// Sonnet on shaky answers.
+const GROUNDED_INSTRUCTION = `When you reference a source, inline its number as [n] in the text.
+Also return:
+  "confidence": "high" if your answer is well-supported by the sources, "low" otherwise.
+  "sourcesCited": array of [n] indices you actually relied on (e.g. [1, 3]).`
+
+// Map the model-emitted citation indices back to Source records for the UI.
+// Tolerant of bad indices (out of range, non-numeric) — drop them silently.
+function mapSourcesCited(cited: unknown, chunks: RetrievedChunk[]): Source[] {
+  if (!Array.isArray(cited) || chunks.length === 0) return []
+  const result: Source[] = []
+  const seen = new Set<number>()
+  for (const raw of cited) {
+    const n = typeof raw === 'number' ? raw : Number(raw)
+    if (!Number.isInteger(n) || n < 1 || n > chunks.length) continue
+    if (seen.has(n)) continue
+    seen.add(n)
+    const c = chunks[n - 1]
+    result.push({ n, url: c.url, breadcrumb: c.breadcrumb, source: c.source })
+  }
+  return result
+}
+
+function isLowConfidence(parsed: { confidence?: unknown }): boolean {
+  return parsed.confidence === 'low'
+}
+
 // ─── logging ─────────────────────────────────────────────────────────────────
 
 function logRoute(opts: {
@@ -126,6 +171,11 @@ function logRoute(opts: {
   inputChars: number
   outputChars: number
   retried: boolean
+  grounded: boolean
+  retrievalTopScore: number
+  retrievedChunkCount: number
+  confidenceRetried: boolean
+  confidence?: Confidence
 }) {
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
@@ -138,10 +188,39 @@ function logRoute(opts: {
     inputCharsApprox: opts.inputChars,
     outputCharsApprox: opts.outputChars,
     retried: opts.retried,
+    grounded: opts.grounded,
+    retrievalTopScore: opts.retrievalTopScore,
+    retrievedChunkCount: opts.retrievedChunkCount,
+    confidenceRetried: opts.confidenceRetried,
+    confidence: opts.confidence,
   }))
 }
 
 // ─── public API ──────────────────────────────────────────────────────────────
+
+type GenerateParsed = Partial<GenerateResponse> & {
+  confidence?: unknown
+  sourcesCited?: unknown
+}
+
+function buildGeneratePrompt(title: string, ancestorPath: string, chunks: RetrievedChunk[]): string {
+  const grounded = chunks.length > 0
+  const sourcesBlock = grounded ? formatSourcesBlock(chunks) : ''
+  const groundedFields = grounded
+    ? `\n- "confidence": "high" | "low"\n- "sourcesCited": array of [n] indices you used`
+    : ''
+  const groundedInstruction = grounded ? `\n\n${GROUNDED_INSTRUCTION}` : ''
+
+  return `You are a learning assistant. Return a JSON object for the given topic in context:
+- "description": 2-3 sentences explaining the concept
+- "needsDiagram": true if this concept has 3-6 distinct subtopics worth exploring visually, false if self-contained
+- "children": if needsDiagram is true, an array of 3-6 subtopic title strings (short titles only, no descriptions). Otherwise an empty array.${groundedFields}
+
+Return ONLY valid JSON, no markdown.${groundedInstruction}${sourcesBlock}
+
+Context: ${ancestorPath}
+Topic: ${title}`
+}
 
 export async function generateNode(title: string, ancestorPath: string): Promise<GenerateResponse> {
   // taskType is inferred from ancestorPath: empty string means this is a
@@ -149,18 +228,18 @@ export async function generateNode(title: string, ancestorPath: string): Promise
   // /api/generate must pass `''` for root — see route comment there.
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
   const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
-  const routeInput: RouteInput = { taskType, depth, historyLen: 0 }
+
+  // Root skips retrieval — it's a taxonomy/structure task and we don't have a
+  // narrow topic to embed against beyond the user's raw input.
+  const retrieval =
+    taskType === 'expand' && ragConfig.enabled
+      ? await retrieve({ topic: title, ancestorPath })
+      : { chunks: [], topScore: 0, groundingViable: false }
+
+  const grounded = retrieval.groundingViable
+  const routeInput: RouteInput = { taskType, depth, historyLen: 0, grounded }
   const initial = pickModel(routeInput)
-
-  const prompt = `You are a learning assistant. Return a JSON object for the given topic in context:
-- "description": 2-3 sentences explaining the concept
-- "needsDiagram": true if this concept has 3-6 distinct subtopics worth exploring visually, false if self-contained
-- "children": if needsDiagram is true, an array of 3-6 subtopic title strings (short titles only, no descriptions). Otherwise an empty array.
-
-Return ONLY valid JSON, no markdown.
-
-Context: ${ancestorPath}
-Topic: ${title}`
+  const prompt = buildGeneratePrompt(title, ancestorPath, grounded ? retrieval.chunks : [])
 
   const start = Date.now()
   const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
@@ -169,28 +248,98 @@ Topic: ${title}`
       maxTokens: MAX_TOKENS_GENERATE,
       timeoutMs: REQUEST_TIMEOUT_MS,
     })
-    return { parsed: parseJson<Partial<GenerateResponse>>(raw), raw }
+    return { parsed: parseJson<GenerateParsed>(raw), raw }
   })
+
+  // Confidence retry: if the model self-flagged low confidence on a grounded
+  // call and we're not already on Sonnet, retry once on ungrounded Sonnet.
+  // Independent of withRetry (which is for transient errors).
+  let finalParsed = value.parsed
+  let finalChoice = choice
+  let finalRawLen = value.raw.length
+  let confidenceRetried = false
+  if (
+    grounded &&
+    ragConfig.confidenceRetry &&
+    isLowConfidence(value.parsed) &&
+    choice.model !== SONNET_FALLBACK.model
+  ) {
+    const fallbackPrompt = buildGeneratePrompt(title, ancestorPath, [])
+    const raw = await callProvider(SONNET_FALLBACK, {
+      messages: [{ role: 'user', content: fallbackPrompt }],
+      maxTokens: MAX_TOKENS_GENERATE,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    })
+    finalParsed = parseJson<GenerateParsed>(raw)
+    finalChoice = SONNET_FALLBACK
+    finalRawLen = raw.length
+    confidenceRetried = true
+  }
+
   const latencyMs = Date.now() - start
+  const confidence =
+    finalParsed.confidence === 'high' || finalParsed.confidence === 'low'
+      ? finalParsed.confidence
+      : undefined
 
   logRoute({
     taskType,
-    choice,
+    choice: finalChoice,
     depth,
     historyLen: 0,
     latencyMs,
     inputChars: prompt.length,
-    outputChars: value.raw.length,
+    outputChars: finalRawLen,
     retried,
+    grounded,
+    retrievalTopScore: retrieval.topScore,
+    retrievedChunkCount: retrieval.chunks.length,
+    confidenceRetried,
+    confidence,
   })
 
   return {
-    description: value.parsed.description ?? '',
-    needsDiagram: value.parsed.needsDiagram ?? false,
-    children: Array.isArray(value.parsed.children)
-      ? (value.parsed.children as string[]).filter(c => typeof c === 'string')
+    description: finalParsed.description ?? '',
+    needsDiagram: finalParsed.needsDiagram ?? false,
+    children: Array.isArray(finalParsed.children)
+      ? (finalParsed.children as string[]).filter(c => typeof c === 'string')
       : [],
+    sources: mapSourcesCited(finalParsed.sourcesCited, retrieval.chunks),
+    confidence,
   }
+}
+
+type QAParsed = Partial<QAResponse> & {
+  confidence?: unknown
+  sourcesCited?: unknown
+}
+
+function buildQASystemPrompt(
+  nodeTitle: string,
+  nodeDescription: string,
+  ancestorPath: string,
+  chunks: RetrievedChunk[],
+): string {
+  const grounded = chunks.length > 0
+  const sourcesBlock = grounded ? formatSourcesBlock(chunks) : ''
+  const groundedFields = grounded
+    ? `,\n  "confidence": "high" | "low",\n  "sourcesCited": array of [n] indices you used`
+    : ''
+  const groundedInstruction = grounded ? `\n\n${GROUNDED_INSTRUCTION}` : ''
+
+  return `You are a learning assistant. The user is studying: ${ancestorPath}
+Node being discussed: ${nodeTitle}
+Node summary: ${nodeDescription}${sourcesBlock}
+
+Answer questions clearly. When your answer involves distinct types, components, or categories, list them as classifications with brief descriptions.${groundedInstruction}
+
+Always return ONLY valid JSON:
+{
+  "answer": "main answer (1-3 sentences)",
+  "classifications": [{ "title": "Name", "description": "1-2 sentence description" }],
+  "offerDiagram": true if there are 3 or more classifications that would benefit from a visual diagram${groundedFields}
+}
+If no classifications apply, return an empty array and false for offerDiagram.`
 }
 
 export async function answerQuestion(
@@ -201,22 +350,20 @@ export async function answerQuestion(
   question: string,
 ): Promise<QAResponse> {
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
-  const routeInput: RouteInput = { taskType: 'qa', depth, historyLen: history.length }
+
+  const retrieval = ragConfig.enabled
+    ? await retrieve({ topic: question, ancestorPath })
+    : { chunks: [], topScore: 0, groundingViable: false }
+
+  const grounded = retrieval.groundingViable
+  const routeInput: RouteInput = { taskType: 'qa', depth, historyLen: history.length, grounded }
   const initial = pickModel(routeInput)
-
-  const system = `You are a learning assistant. The user is studying: ${ancestorPath}
-Node being discussed: ${nodeTitle}
-Node summary: ${nodeDescription}
-
-Answer questions clearly. When your answer involves distinct types, components, or categories, list them as classifications with brief descriptions.
-
-Always return ONLY valid JSON:
-{
-  "answer": "main answer (1-3 sentences)",
-  "classifications": [{ "title": "Name", "description": "1-2 sentence description" }],
-  "offerDiagram": true if there are 3 or more classifications that would benefit from a visual diagram
-}
-If no classifications apply, return an empty array and false for offerDiagram.`
+  const system = buildQASystemPrompt(
+    nodeTitle,
+    nodeDescription,
+    ancestorPath,
+    grounded ? retrieval.chunks : [],
+  )
 
   const messages = [
     ...history.map(h => ({ role: h.role, content: h.content })),
@@ -232,24 +379,59 @@ If no classifications apply, return an empty array and false for offerDiagram.`
       maxTokens: MAX_TOKENS_QA,
       timeoutMs: REQUEST_TIMEOUT_MS,
     })
-    return { parsed: parseJson<Partial<QAResponse>>(raw), raw }
+    return { parsed: parseJson<QAParsed>(raw), raw }
   })
+
+  let finalParsed = value.parsed
+  let finalChoice = choice
+  let finalRawLen = value.raw.length
+  let confidenceRetried = false
+  if (
+    grounded &&
+    ragConfig.confidenceRetry &&
+    isLowConfidence(value.parsed) &&
+    choice.model !== SONNET_FALLBACK.model
+  ) {
+    const fallbackSystem = buildQASystemPrompt(nodeTitle, nodeDescription, ancestorPath, [])
+    const raw = await callProvider(SONNET_FALLBACK, {
+      system: fallbackSystem,
+      messages,
+      maxTokens: MAX_TOKENS_QA,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    })
+    finalParsed = parseJson<QAParsed>(raw)
+    finalChoice = SONNET_FALLBACK
+    finalRawLen = raw.length
+    confidenceRetried = true
+  }
+
   const latencyMs = Date.now() - start
+  const confidence =
+    finalParsed.confidence === 'high' || finalParsed.confidence === 'low'
+      ? finalParsed.confidence
+      : undefined
 
   logRoute({
     taskType: 'qa',
-    choice,
+    choice: finalChoice,
     depth,
     historyLen: history.length,
     latencyMs,
     inputChars,
-    outputChars: value.raw.length,
+    outputChars: finalRawLen,
     retried,
+    grounded,
+    retrievalTopScore: retrieval.topScore,
+    retrievedChunkCount: retrieval.chunks.length,
+    confidenceRetried,
+    confidence,
   })
 
   return {
-    answer: value.parsed.answer ?? '',
-    classifications: Array.isArray(value.parsed.classifications) ? value.parsed.classifications : [],
-    offerDiagram: value.parsed.offerDiagram ?? false,
+    answer: finalParsed.answer ?? '',
+    classifications: Array.isArray(finalParsed.classifications) ? finalParsed.classifications : [],
+    offerDiagram: finalParsed.offerDiagram ?? false,
+    sources: mapSourcesCited(finalParsed.sourcesCited, retrieval.chunks),
+    confidence,
   }
 }

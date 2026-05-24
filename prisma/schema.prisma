@@ -36,8 +36,34 @@ model QAMessage {
   role      String
   content   String
   diagram   Json?
+  sources   Json?
   createdAt DateTime @default(now())
   node      Node     @relation(fields: [nodeId], references: [id])
 
   @@index([nodeId])
+}
+
+model Doc {
+  id         String   @id @default(uuid())
+  source     String
+  url        String   @unique
+  title      String
+  breadcrumb String
+  language   String?
+  fetchedAt  DateTime @default(now())
+  chunks     Chunk[]
+
+  @@index([source])
+}
+
+model Chunk {
+  id      String  @id @default(uuid())
+  docId   String
+  ordinal Int
+  content String
+  isCode  Boolean @default(false)
+  tokens  Int
+  doc     Doc     @relation(fields: [docId], references: [id], onDelete: Cascade)
+
+  @@index([docId])
 }

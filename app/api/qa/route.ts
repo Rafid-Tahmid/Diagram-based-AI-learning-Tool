@@ -100,6 +100,9 @@ export async function POST(request: Request) {
           // nullable Json column as SQL NULL. Plain `null` requires the
           // `Prisma.JsonNull` sentinel for the Json type.
           diagram: data.classifications.length > 0 ? data.classifications : undefined,
+          // Same undefined-skip pattern for the new sources column. Stays
+          // SQL NULL when the answer was ungrounded or cited nothing.
+          sources: data.sources && data.sources.length > 0 ? data.sources : undefined,
         },
       }),
     ])

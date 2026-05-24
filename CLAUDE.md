@@ -285,11 +285,85 @@ Fixed `/api/generate` passing `rawTopic` as its own ancestor — root calls now 
   `max_completion_tokens` — latent bug because the router doesn't currently
   pick OpenAI, but the field is required for reasoning models in SDK v5+.
 
-### Phase 6 — RAG / Knowledge Grounding (not started)
-**Goal:** Before generating an explanation, retrieve relevant context chunks from
-a knowledge source (Wikipedia API or embedded document store). Explanations are
-grounded in real sources and show citations.
-**Done when:** Generated explanation references a real source, not hallucinated detail.
+### Phase 6 — Domain-specialized Grounded Retrieval (in progress)
+**Goal:** Pivot toward math/CS-focused exploration. Build a pluggable retrieval
+layer over a curated, license-clean corpus (Wikipedia math/CS subset, MDN,
+official language docs, etc.). Retrieved chunks ground `expand` descriptions and
+`qa` answers. When retrieval is viable, cheaper model tiers (Haiku/Flash) handle
+the call — the corpus does the recall work, not the model's training. Every
+component (models, embedding provider, vector DB, corpora, thresholds) is
+swappable via config without touching call sites.
+
+**Done when:**
+- A grounded Q&A call retrieves 2–4 chunks and returns an answer with `[n]` citations.
+- "Sources" pills render under grounded answers, each linking to the original URL.
+- Switching embedding model / retrieval threshold / model tier requires only a config
+  change (env var or `lib/ragConfig.ts`) — no edits to `lib/ai.ts` or routes.
+- An eval harness measures grounded vs ungrounded accuracy on a fixed query set
+  before any model-tier downgrade ships.
+- App still works end-to-end with an empty `Chunk` table (graceful degradation to
+  the existing ungrounded routing).
+
+**Rollout stages** (each leaves the app in a working state):
+- **Stage 1 (in progress):** Foundation — pgvector + schema, `lib/ragConfig.ts`,
+  `lib/embeddings.ts`, `lib/retrieval.ts`. No behavior change yet; retrieve always
+  returns `groundingViable: false` until corpora are ingested.
+- **Stage 2 (in progress):** Wire retrieval into `lib/ai.ts`. Router accepts a
+  `grounded` flag but, by config default, keeps using the current model tiers
+  (grounding adds accuracy, no downgrade yet). Promote-on-low-confidence retry.
+- **Stage 3 (later):** Ingestion pipeline + first corpus (MDN). Shared chunker,
+  embedder, bulk writer under `scripts/ingest/_lib/`; each source is its own
+  registered script.
+- **Stage 4 (later):** UI source pills + `[n]` citations in NodePanel; persist
+  `sources` JSON on `QAMessage`.
+- **Stage 5 (later):** Eval harness — `scripts/eval/` with a fixed query set,
+  Sonnet-as-judge, compares ungrounded Sonnet vs grounded {Sonnet, Haiku, Flash}.
+- **Stage 6 (later, gated on eval):** Flip `RAG_TIER=cheap` in config; Q&A drops
+  from Sonnet to Haiku-grounded. Single-line config change.
+
+**Architecture — swappable surfaces:**
+- **LLM models:** existing `lib/router.ts` `pickModel()`, extended with `grounded?: boolean`.
+- **Embedding provider:** `lib/embeddings.ts` mirrors the `lib/providers/*` shape —
+  `callEmbed({ provider, model, text })`. OpenAI `text-embedding-3-small` is the
+  default; Gemini `text-embedding-004` is one config flip away.
+- **Vector DB:** behind `lib/retrieval.ts` — pgvector today, could become Qdrant /
+  Pinecone / managed without touching `lib/ai.ts`. Raw SQL is quarantined to this
+  one file (see Key Decisions).
+- **Corpora:** each one is `scripts/ingest/<source>.ts` exporting a common
+  `IngestSource` interface; new sources are added by writing one file and
+  registering it.
+- **Tunables:** `lib/ragConfig.ts` reads env vars (`RAG_TOP_K`, `RAG_SCORE_THRESHOLD`,
+  `RAG_TIER`, `RAG_EMBEDDING_PROVIDER`, etc.) with safe defaults — restart-only
+  change, no rebuild.
+- **Stage 1 vs Stage 2 routing:** controlled by `RAG_TIER=baseline|cheap` config.
+
+**Built so far (Stages 1 + 2):**
+- pgvector extension setup + Prisma schema additions (`Doc`, `Chunk`, `sources Json?`
+  on `QAMessage`). Vector column + HNSW cosine index added via raw SQL in
+  `prisma/sql/001_pgvector.sql` (Prisma 5 doesn't natively type the `vector` column).
+- `lib/ragConfig.ts` — central env-driven tunables (topK, scoreThreshold, tier,
+  embedding provider/model, retrieval enabled, confidence-retry on/off).
+- `lib/embeddings.ts` — pluggable embedding provider with OpenAI + Gemini wrappers,
+  lazy clients (same pattern as `lib/providers/*`), per-call timeout.
+- `lib/retrieval.ts` — `retrieve(query)` returns `{ chunks, topScore, groundingViable }`.
+  Empty-corpus safe: returns `groundingViable: false` when no chunks exist or top
+  score is below threshold, so the rest of the app degrades gracefully to the
+  ungrounded path.
+- `lib/router.ts` — `RouteInput` extended with `grounded?: boolean`. `pickModel()`
+  consults `ragConfig.tier`: `baseline` keeps existing models (Stage 1 default,
+  pure accuracy play); `cheap` drops Q&A and expand to Haiku/Flash (Stage 2).
+- `lib/ai.ts` — `generateNode` (expand only) and `answerQuestion` retrieve first,
+  prepend a sources block to the system prompt when viable, and ask the model to
+  return `confidence` + `sourcesCited`. On `confidence: "low"` (when enabled), one
+  explicit retry on ungrounded Sonnet. Source metadata flows back in the response.
+- Updated `QAResponse` and `GenerateResponse` types to carry `sources` and `confidence`.
+
+**Do NOT build yet (other stages):**
+- Actual ingestion — no corpora are populated; `Chunk` table is empty by design until
+  Stage 3.
+- UI source pills + `[n]` rendering — Stage 4.
+- Eval harness — Stage 5.
+- Model-tier downgrade flip (`RAG_TIER=cheap`) — Stage 6, gated on Stage 5 eval results.
 
 ### Phase 7 — Navigation Polish (not started)
 **Goal:** Sidebar tree showing the full explored hierarchy. Breadcrumb is clickable.
@@ -297,8 +371,8 @@ User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
 
 ## Current Phase
-**Phase 5 — complete**
-Next up: Phase 6 (RAG / knowledge grounding).
+**Phase 6 — in progress (Stages 1 + 2 landed: foundation + AI wiring)**
+Next up within Phase 6: Stage 3 (ingestion pipeline + first corpus).
 
 ## Key Decisions Log
 - React Flow chosen for diagram rendering (rich interactive features, good ecosystem)
@@ -410,8 +484,52 @@ Next up: Phase 6 (RAG / knowledge grounding).
   silent default produced an empty generated node with no children and no
   description — failure looked like success.
 - `MAX_TOKENS` split into `MAX_TOKENS_GENERATE` (1024) and `MAX_TOKENS_QA`
-  (2048). Q&A answers + classifications occasionally truncated mid-JSON
-  on the shared 1024 cap.
+ (2048). Q&A answers + classifications occasionally truncated mid-JSON
+ on the shared 1024 cap.
 - `/api/qa` POST rejects empty `nodeTitle` (was previously only checked
-  for type, not content).
+ for type, not content).
 - `dbMsgToMessage` narrows `row.role` defensively rather than casting.
+
+**Phase 6 — Stage 1 + Stage 2 decisions:**
+- **pgvector chosen over a separate vector DB** — keeps infra to the existing
+  Postgres container, no new service. The `vector` column type isn't supported
+  natively by Prisma 5, so raw SQL is unavoidable for vector ops.
+- **Raw SQL is quarantined to `lib/retrieval.ts` and `prisma/sql/*` only.** This is
+  a deliberate, documented exception to the "no raw SQL" rule in
+  `api-conventions.md` / `phase-workflow.md`. The rule's intent is to prevent
+  ad-hoc SQL leaking into business logic; `lib/retrieval.ts` is structurally a
+  storage adapter, and callers see only typed TypeScript.
+- **pgvector index is HNSW with `vector_cosine_ops`.** Better recall-at-k than
+  IVFFlat at the corpus sizes we'll see (≤500k chunks); slightly higher build
+  cost is irrelevant for a write-once / read-many corpus.
+- **Embedding dimension is fixed at 1536** (matches OpenAI `text-embedding-3-small`).
+  Swapping to Gemini `text-embedding-004` (768) requires a one-time
+  re-embed + column dim change — same migration shape as a corpus refresh, so the
+  abstraction holds.
+- **`lib/embeddings.ts` mirrors `lib/providers/*`** — lazy client, per-call
+  timeout, provider-agnostic args. New providers add one file.
+- **`retrieve()` always returns a `groundingViable` boolean.** Empty corpus, low
+  top-score, or retrieval disabled in config → `false` → caller falls back to
+  existing ungrounded path. This is the empty-corpus / degradation safety net.
+- **`scoreThreshold` defaults to 0.55** (cosine). Below this, retrieval is
+  treated as a miss; we'd rather use ungrounded Sonnet than ground a small model
+  on weakly-relevant chunks (the worst RAG failure mode).
+- **Stage 1 vs Stage 2 routing is config-gated, not code-gated.** Default is
+  `RAG_TIER=baseline` (grounded calls keep current models — pure accuracy win).
+  Flipping to `RAG_TIER=cheap` drops Q&A to Haiku and `expand` to Haiku/Flash
+  — only after the Stage 5 eval shows it's safe.
+- **Model self-flags confidence (`high | low`).** On `low` and when not already
+  on Sonnet, one explicit retry against ungrounded Sonnet. This is a separate
+  mechanism from `withRetry` (which is for transient errors only). Toggleable
+  via `RAG_CONFIDENCE_RETRY` in case it ever causes a thundering retry storm.
+- **`root` calls skip retrieval entirely.** It's a taxonomy/structure task —
+  Sonnet's parametric knowledge of "what are the major sub-fields of X?" beats
+  grounding here, and at root we don't yet have a topic-specific query to embed
+  against beyond the user's raw input.
+- **Retrieval is best-effort.** A retrieval error logs a warning and the call
+  proceeds ungrounded — it never blocks the user. Same fail-soft posture as the
+  rest of the AI pipeline.
+- **`QAMessage.sources Json?` mirrors the existing `diagram Json?` pattern.**
+  Optional column, `undefined` to skip (avoids the `Prisma.JsonNull` sentinel).
+- **All new env vars have defaults.** `lib/ragConfig.ts` parses `RAG_*` env vars
+  with safe fallbacks; an unset env is "use Stage 1 defaults", never a crash.
