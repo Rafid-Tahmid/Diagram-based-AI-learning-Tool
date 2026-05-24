@@ -285,95 +285,52 @@ Fixed `/api/generate` passing `rawTopic` as its own ancestor — root calls now 
   `max_completion_tokens` — latent bug because the router doesn't currently
   pick OpenAI, but the field is required for reasoning models in SDK v5+.
 
-### Phase 6 — Domain-specialized Grounded Retrieval (in progress)
-**Goal:** Pivot toward math/CS-focused exploration. Build a pluggable retrieval
-layer over a curated, license-clean corpus (Wikipedia math/CS subset, MDN,
-official language docs, etc.). Retrieved chunks ground `expand` descriptions and
-`qa` answers. When retrieval is viable, cheaper model tiers (Haiku/Flash) handle
-the call — the corpus does the recall work, not the model's training. Every
-component (models, embedding provider, vector DB, corpora, thresholds) is
-swappable via config without touching call sites.
+### Phase 6 — Domain-specialized Grounded Retrieval ✅ COMPLETE (Stages 1–4)
+**Goal:** Build a pluggable retrieval layer that grounds AI answers in real sources.
+Users pick a domain (General / Technology / Programming / Medical / Science / History).
+On every node expansion and Q&A question, Wikipedia is fetched on-demand for uncached
+topics (just-in-time ingestion), chunked, embedded with Gemini, and stored. Future
+requests for the same topic skip the fetch and query the vector DB directly. Grounded
+answers show clickable source citation pills linking back to the original article.
 
-**Done when:**
-- A grounded Q&A call retrieves 2–4 chunks and returns an answer with `[n]` citations.
-- "Sources" pills render under grounded answers, each linking to the original URL.
-- Switching embedding model / retrieval threshold / model tier requires only a config
-  change (env var or `lib/ragConfig.ts`) — no edits to `lib/ai.ts` or routes.
-- An eval harness measures grounded vs ungrounded accuracy on a fixed query set
-  before any model-tier downgrade ships.
-- App still works end-to-end with an empty `Chunk` table (graceful degradation to
-  the existing ungrounded routing).
+**Built (Stages 1–4):**
+- `prisma/schema.prisma` — `Doc` + `Chunk` models, `sources Json?` on `QAMessage`,
+  `domain String` on `Session`.
+- `prisma/sql/001_pgvector.sql` — pgvector extension, `vector(3072)` column on `Chunk`
+  (Gemini dims). No HNSW index — pgvector caps HNSW at 2000 dims; sequential scan is
+  fast enough for small corpora. Add IVFFlat when corpus exceeds ~50k chunks.
+- `lib/ragConfig.ts` — env-driven tunables (`RAG_ENABLED`, `RAG_TOP_K`,
+  `RAG_SCORE_THRESHOLD`, `RAG_TIER`, `RAG_EMBEDDING_PROVIDER`, `RAG_EMBEDDING_DIM`).
+  Auto-detects embedding provider from available keys (Google preferred over OpenAI).
+- `lib/embeddings.ts` — OpenAI + Gemini embedding wrappers, lazy clients, per-call timeout,
+  dim-mismatch detection at the boundary.
+- `lib/retrieval.ts` — `retrieve()` + `retrieveOrIngest()`. JIT: on cache miss, calls
+  `ingestTopic()` then re-queries. Every failure path returns `groundingViable: false`
+  so the app always falls back to ungrounded generation cleanly.
+- `lib/sources/wikipedia.ts` — fetches full article text via Wikipedia REST API (not
+  just the summary). Returns `null` on miss so callers degrade gracefully.
+- `lib/chunker.ts` — paragraph-based text splitter, ~400 token target chunks.
+- `lib/ingest.ts` — orchestrates fetch → chunk → embed → upsert. Deduplicates on
+  `Doc.url` (unique constraint); concurrent requests for the same URL hit P2002 and
+  fall back to querying the existing chunks.
+- `lib/domains.ts` — 6 domains with source lists. MDN listed as a source for
+  Technology/Programming but currently falls back to Wikipedia (MDN fetcher is a
+  stub — real implementation is future work).
+- `lib/router.ts` — tiered model catalog (cheap/strong × Anthropic/OpenAI/Google),
+  cost-ranked selection, `ROUTER_MULTI_PROVIDER` opt-in, per-task env overrides.
+- `lib/ai.ts` — `generateNode` and `answerQuestion` accept `domain`, call
+  `retrieveOrIngest`, inject numbered source blocks into prompts when grounded,
+  ask for `confidence` + `sourcesCited`, retry on `confidence: "low"`.
+- All API routes accept `domain` and thread it through to AI calls.
+- `app/page.tsx` — domain pill selector, domain saved to session, restored from history.
+- `components/NodePanel.tsx` — source citation pills rendered below grounded answers,
+  each showing `[n] breadcrumb` and linking to the original URL in a new tab.
+  Sources restored from DB on thread reload.
 
-**Rollout stages** (each leaves the app in a working state):
-- **Stage 1 (in progress):** Foundation — pgvector + schema, `lib/ragConfig.ts`,
-  `lib/embeddings.ts`, `lib/retrieval.ts`. No behavior change yet; retrieve always
-  returns `groundingViable: false` until corpora are ingested.
-- **Stage 2 (in progress):** Wire retrieval into `lib/ai.ts`. Router accepts a
-  `grounded` flag but, by config default, keeps using the current model tiers
-  (grounding adds accuracy, no downgrade yet). Promote-on-low-confidence retry.
-- **Stage 3 (later):** Ingestion pipeline + first corpus (MDN). Shared chunker,
-  embedder, bulk writer under `scripts/ingest/_lib/`; each source is its own
-  registered script.
-- **Stage 4 (later):** UI source pills + `[n]` citations in NodePanel; persist
-  `sources` JSON on `QAMessage`.
-- **Stage 5 (later):** Eval harness — `scripts/eval/` with a fixed query set,
-  Sonnet-as-judge, compares ungrounded Sonnet vs grounded {Sonnet, Haiku, Flash}.
-- **Stage 6 (later, gated on eval):** Flip `RAG_TIER=cheap` in config; Q&A drops
-  from Sonnet to Haiku-grounded. Single-line config change.
-
-**Architecture — swappable surfaces:**
-- **LLM models:** existing `lib/router.ts` `pickModel()`, extended with `grounded?: boolean`.
-- **Embedding provider:** `lib/embeddings.ts` mirrors the `lib/providers/*` shape —
-  `callEmbed({ provider, model, text })`. OpenAI `text-embedding-3-small` is the
-  default; Gemini `text-embedding-004` is one config flip away.
-- **Vector DB:** behind `lib/retrieval.ts` — pgvector today, could become Qdrant /
-  Pinecone / managed without touching `lib/ai.ts`. Raw SQL is quarantined to this
-  one file (see Key Decisions).
-- **Corpora:** each one is `scripts/ingest/<source>.ts` exporting a common
-  `IngestSource` interface; new sources are added by writing one file and
-  registering it.
-- **Tunables:** `lib/ragConfig.ts` reads env vars (`RAG_TOP_K`, `RAG_SCORE_THRESHOLD`,
-  `RAG_TIER`, `RAG_EMBEDDING_PROVIDER`, etc.) with safe defaults — restart-only
-  change, no rebuild.
-- **Stage 1 vs Stage 2 routing:** controlled by `RAG_TIER=baseline|cheap` config.
-
-**Built so far (Stages 1 + 2):**
-- pgvector extension setup + Prisma schema additions (`Doc`, `Chunk`, `sources Json?`
-  on `QAMessage`). Vector column + HNSW cosine index added via raw SQL in
-  `prisma/sql/001_pgvector.sql` (Prisma 5 doesn't natively type the `vector` column).
-- `lib/ragConfig.ts` — central env-driven tunables (topK, scoreThreshold, tier,
-  retrieval enabled, confidence-retry on/off). Embedding provider auto-detected:
-  `RAG_EMBEDDING_PROVIDER=auto` (default) prefers Google over OpenAI, returns
-  `null` if neither key is set. Model and dim default from a provider-keyed
-  lookup table; both overridable per env.
-- `lib/embeddings.ts` — pluggable embedding provider with OpenAI + Gemini wrappers,
-  lazy clients (same pattern as `lib/providers/*`), per-call timeout. Throws with
-  a clear message when called without an available provider.
-- `lib/retrieval.ts` — `retrieve(query)` returns `{ chunks, topScore, groundingViable }`.
-  Empty-corpus / no-embedding-provider / score-too-low / error → returns
-  `groundingViable: false`, app degrades to ungrounded. One-time info notice
-  when no embedding provider is configured (Anthropic-only deploys).
-- `lib/router.ts` — provider availability auto-detected at module load. Tiered
-  model catalog (`cheap` / `strong` × Anthropic / OpenAI / Google) with cost-ranked
-  selection. `RouteInput.grounded?: boolean`. `pickModel()` filters the catalog
-  by required tier + available providers, returns the cheapest match. `promote()`
-  returns the strongest available, not a hardcoded Sonnet. `MODEL_ROOT` /
-  `MODEL_EXPAND` / `MODEL_QA` env overrides bypass auto-routing.
-  `ROUTER_MULTI_PROVIDER=false` forces Anthropic-only even when other keys are set.
-- `lib/ai.ts` — `generateNode` (expand only) and `answerQuestion` retrieve first,
-  prepend a sources block to the system prompt when viable, and ask the model to
-  return `confidence` + `sourcesCited`. On `confidence: "low"` (when enabled), one
-  explicit retry on the strongest available model with an ungrounded prompt
-  (skipped if we're already on a strong-tier model). Source metadata flows back
-  in the response.
-- Updated `QAResponse` and `GenerateResponse` types to carry `sources` and `confidence`.
-
-**Do NOT build yet (other stages):**
-- Actual ingestion — no corpora are populated; `Chunk` table is empty by design until
-  Stage 3.
-- UI source pills + `[n]` rendering — Stage 4.
-- Eval harness — Stage 5.
-- Model-tier downgrade flip (`RAG_TIER=cheap`) — Stage 6, gated on Stage 5 eval results.
+**Remaining (Stages 5–6, lower priority):**
+- Stage 5 — eval harness (`scripts/eval/`) measuring grounded vs ungrounded accuracy.
+- Stage 6 — flip `RAG_TIER=cheap` after eval passes (drops grounded Q&A to Haiku).
+- MDN fetcher (`lib/sources/mdn.ts`) — currently a stub that falls back to Wikipedia.
 
 ### Phase 7 — Cloud Database Migration (not started)
 **Goal:** Move from local Docker Postgres to a shared cloud database (Neon) so anyone
@@ -409,8 +366,8 @@ User can jump to any previously visited node. "Reset" button clears the session.
 **Done when:** 5 levels deep → jump back to level 2 → explore a different branch.
 
 ## Current Phase
-**Phase 6 — in progress (Stages 1 + 2 landed: foundation + AI wiring)**
-Next up within Phase 6: Stage 3 (ingestion pipeline + first corpus).
+**Phase 6 — complete (Stages 1–4 done)**
+Next up: Phase 7 (Neon cloud DB migration) or Phase 9 (navigation polish).
 
 ## Key Decisions Log
 - React Flow chosen for diagram rendering (rich interactive features, good ecosystem)
@@ -620,3 +577,29 @@ Next up within Phase 6: Stage 3 (ingestion pipeline + first corpus).
   power users / dim-reducing models. The pgvector column dim must match
   RAG_EMBEDDING_DIM — switching providers requires a column drop + recreate
   + re-ingest, same as any embedding-model change.
+
+**Phase 6 — Stages 3 + 4 (JIT ingestion + domain selector + citation UI):**
+- **JIT ingestion replaces bulk pre-ingestion.** On a retrieval cache miss,
+  the server fetches Wikipedia for the topic, chunks it, embeds with Gemini,
+  and stores Doc + Chunk rows — all before the AI call. The current request
+  is grounded immediately. Future requests for the same topic skip the fetch.
+- **pgvector HNSW index is capped at 2000 dims.** Gemini returns 3072 dims,
+  so we skip the HNSW index entirely and use a sequential scan. For small
+  corpora (< ~50k chunks) this is imperceptibly fast. Add an IVFFlat index
+  when the corpus grows large enough to warrant it.
+- **Embedding column is `vector(3072)`** to match `gemini-embedding-001`.
+  Configured via `RAG_EMBEDDING_PROVIDER=google` + `RAG_EMBEDDING_DIM=3072`
+  in `.env.local`. Switching to OpenAI requires dropping and recreating the
+  column (1536 dims) and re-ingesting.
+- **Domain is saved on the Session row** and restored when loading from
+  history. The `sourceFilter` passed to `retrieve()` is derived from
+  `DOMAINS[domain].sources` so retrieval is scoped to domain-relevant sources.
+- **`Doc.url` is `@unique`** — the dedup boundary. Concurrent ingest requests
+  for the same topic hit a P2002 constraint error; the loser queries the
+  existing Doc's chunks instead of crashing.
+- **MDN fetcher is a stub** — currently calls `fetchWikipedia` as a fallback.
+  Listed in `DOMAINS.technology.sources` and `DOMAINS.programming.sources`
+  so when a real MDN fetcher is added it activates automatically.
+- **Source citation pills** appear below grounded assistant messages.
+  Each pill is a link: `[n] Wikipedia › Article Title` → opens the source URL.
+  Sources are persisted to `QAMessage.sources Json?` and restored on thread reload.
