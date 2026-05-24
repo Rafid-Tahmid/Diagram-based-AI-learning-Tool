@@ -2,7 +2,7 @@
 
 Type any topic and explore it as an interactive diagram. Click a node to generate its explanation and sub-topics on demand. A per-node chat lets you ask follow-up questions grounded in Wikipedia sources.
 
-Content is generated lazily — nothing is fetched until you click.
+Content is generated lazily — nothing is fetched until you click. Supports light and dark mode with preference saved across reloads.
 
 ## Stack
 
@@ -86,11 +86,14 @@ The app works with only `ANTHROPIC_API_KEY` — RAG degrades gracefully to ungro
   NodePanel.tsx           right panel: Description tab + Ask (chat) tab
   QAInlineDiagram.tsx     display-only diagram inside a chat reply
   Breadcrumb.tsx          ancestor path navigation
+  SidebarTree.tsx         collapsible left panel showing the full explored hierarchy
 /lib
   ai.ts                   generateNode() + answerQuestion() — RAG-aware
   router.ts               multi-model routing (Anthropic / OpenAI / Google)
   retrieval.ts            pgvector similarity search + JIT Wikipedia ingest
   ingest.ts               fetch → chunk → embed → upsert pipeline
+  treeUtils.ts            pure tree helpers (buildPath, collapse set ops)
+  jsonUtils.ts            safe JSON parse utilities
   db.ts                   Prisma singleton client
   types.ts                shared TypeScript types
 /prisma
