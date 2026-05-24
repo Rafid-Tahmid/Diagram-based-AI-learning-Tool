@@ -113,10 +113,10 @@ Load only when working in the relevant area:
 | 5 — Multi-Model Routing | ✅ | `lib/router.ts`, three provider wrappers |
 | 6 — Grounded Retrieval | ✅ | RAG + domains + source citations (Stages 1–4) |
 | 7 — Cloud DB Migration | ✅ | Swap Docker Postgres → Neon |
-| 9 — Navigation Polish | not started | Sidebar tree, clickable breadcrumb, reset |
+| 9 — Navigation Polish | ✅ | Sidebar tree, clickable breadcrumb, reset |
 
 ## Current Phase
-**Phase 7 complete.** Next: Phase 9 (navigation polish).
+**All phases complete.**
 
 ### Phase 7 — Cloud DB Migration
 **Goal:** Replace local Docker Postgres with Neon so anyone cloning the repo needs only a connection string. RAG corpus accumulates across all users.
