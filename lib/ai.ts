@@ -227,17 +227,13 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
   const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
   const domainSources = DOMAINS[isDomainId(domain) ? domain : DEFAULT_DOMAIN].sources
 
-  // Root skips retrieval — it's a taxonomy/structure task and we don't have a
-  // narrow topic to embed against beyond the user's raw input.
-  const retrieval =
-    taskType === 'expand' && ragConfig.enabled
-      ? await retrieveOrIngest({ topic: title, ancestorPath }, domainSources)
-      : { chunks: [], topScore: 0, groundingViable: false }
+  const retrieval = ragConfig.enabled
+    ? await retrieveOrIngest({ topic: title, ancestorPath }, domainSources)
+    : { chunks: [], topScore: 0, groundingViable: false }
 
-  const grounded = retrieval.groundingViable
-  const routeInput: RouteInput = { taskType, depth, historyLen: 0, grounded }
+  const routeInput: RouteInput = { taskType, depth, historyLen: 0, retrievalScore: retrieval.topScore }
   const initial = pickModel(routeInput)
-  const prompt = buildGeneratePrompt(title, ancestorPath, grounded ? retrieval.chunks : [])
+  const prompt = buildGeneratePrompt(title, ancestorPath, retrieval.groundingViable ? retrieval.chunks : [])
 
   const start = Date.now()
   const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
@@ -257,7 +253,7 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
   let finalChoice = choice
   let finalRawLen = value.raw.length
   let confidenceRetried = false
-  if (grounded && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
+  if (retrieval.groundingViable && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
     const strong = promote(choice)
     const alreadyStrong = strong.model === choice.model && strong.provider === choice.provider
     if (!alreadyStrong) {
@@ -289,7 +285,7 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
     inputChars: prompt.length,
     outputChars: finalRawLen,
     retried,
-    grounded,
+    grounded: retrieval.groundingViable,
     retrievalTopScore: retrieval.topScore,
     retrievedChunkCount: retrieval.chunks.length,
     confidenceRetried,
@@ -355,14 +351,13 @@ export async function answerQuestion(
     ? await retrieveOrIngest({ topic: question, ancestorPath }, domainSources)
     : { chunks: [], topScore: 0, groundingViable: false }
 
-  const grounded = retrieval.groundingViable
-  const routeInput: RouteInput = { taskType: 'qa', depth, historyLen: history.length, grounded }
+  const routeInput: RouteInput = { taskType: 'qa', depth, historyLen: history.length, retrievalScore: retrieval.topScore }
   const initial = pickModel(routeInput)
   const system = buildQASystemPrompt(
     nodeTitle,
     nodeDescription,
     ancestorPath,
-    grounded ? retrieval.chunks : [],
+    retrieval.groundingViable ? retrieval.chunks : [],
   )
 
   const messages = [
@@ -386,7 +381,7 @@ export async function answerQuestion(
   let finalChoice = choice
   let finalRawLen = value.raw.length
   let confidenceRetried = false
-  if (grounded && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
+  if (retrieval.groundingViable && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
     const strong = promote(choice)
     const alreadyStrong = strong.model === choice.model && strong.provider === choice.provider
     if (!alreadyStrong) {
@@ -419,7 +414,7 @@ export async function answerQuestion(
     inputChars,
     outputChars: finalRawLen,
     retried,
-    grounded,
+    grounded: retrieval.groundingViable,
     retrievalTopScore: retrieval.topScore,
     retrievedChunkCount: retrieval.chunks.length,
     confidenceRetried,

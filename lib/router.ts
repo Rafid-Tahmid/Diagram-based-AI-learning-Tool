@@ -1,4 +1,3 @@
-import { ragConfig } from '@/lib/ragConfig'
 
 export type TaskType = 'root' | 'expand' | 'qa'
 export type ProviderName = 'anthropic' | 'openai' | 'google'
@@ -7,11 +6,12 @@ export type RouteInput = {
   taskType: TaskType
   depth: number
   historyLen: number
-  // True when retrieval succeeded and groundingViable is set. Lets the router
-  // drop to a cheaper tier under ragConfig.tier='cheap' because the retrieved
-  // chunks do the recall work that the bigger model would otherwise do from
-  // parametric memory. Defaults to false → existing ungrounded routing.
-  grounded?: boolean
+  // Cosine similarity score of the best retrieved chunk (0–1). When >= the
+  // HAIKU_SAFE_SCORE threshold, the chunk is reliably on-topic and Haiku can
+  // produce quality output — the corpus does the recall work. Below that,
+  // Sonnet is used because the chunk introduces more noise than signal for a
+  // smaller model. Absent (or 0) → ungrounded → Sonnet.
+  retrievalScore?: number
 }
 
 export type ModelChoice = {
@@ -107,29 +107,31 @@ const CATALOG: readonly CatalogEntry[] = Object.freeze([
 // falls through to cost-ranked across whatever providers ARE available.
 const MULTI_PROVIDER = (process.env.ROUTER_MULTI_PROVIDER ?? 'false').toLowerCase() === 'true'
 
+// Minimum retrieval score for Haiku to be safe. Below this the chunk is too
+// noisy for a smaller model — Sonnet is used instead (chunks still injected
+// when score >= ragConfig.scoreThreshold; Sonnet reasons over imperfect context
+// better than Haiku does). Derived from Gemini embedding similarity benchmarks:
+// >= 0.72 = chunk is specifically about this topic; < 0.72 = tangential noise.
+// Tune upward if grounded Haiku answers feel shallow; downward to save more.
+const HAIKU_SAFE_SCORE = 0.72
+
 type RequiredTier = 'cheap' | 'strong'
 
 function requiredTier(input: RouteInput): RequiredTier {
-  switch (input.taskType) {
-    case 'root':
-      // First impression — quality matters more than cost. One call per session.
-      return 'strong'
+  const score = input.retrievalScore ?? 0
 
-    case 'expand':
-      // Structural — produce a description + child titles from an ancestor path.
-      // Even ungrounded, cheap-tier models do this well.
-      return 'cheap'
+  // Uniform rule across all task types:
+  //   score >= 0.72 → Haiku  (chunks are on-topic, corpus does the recall)
+  //   score <  0.72 → Sonnet (ungrounded or noisy — model memory needed)
+  // This makes the app progressively cheaper as the corpus fills in:
+  // cold start = always Sonnet, warm corpus = almost always Haiku.
+  if (score >= HAIKU_SAFE_SCORE) return 'cheap'
 
-    case 'qa':
-      // The interesting case. Four sub-cases:
-      // 1. grounded + ragConfig.tier='cheap'  → cheap (chunks do the recall, Stage 2)
-      // 2. grounded + ragConfig.tier='baseline' → strong (Stage 1 — accuracy play)
-      // 3. ungrounded + long history → cheap (cap conversation cost)
-      // 4. ungrounded + short history → strong (nuanced Q&A)
-      if (input.grounded && ragConfig.tier === 'cheap') return 'cheap'
-      if (!input.grounded && input.historyLen >= 10) return 'cheap'
-      return 'strong'
-  }
+  // Long Q&A history: cap cost regardless of grounding — context window
+  // is large and the conversation itself provides grounding.
+  if (input.taskType === 'qa' && input.historyLen >= 10) return 'cheap'
+
+  return 'strong'
 }
 
 function candidatesForTier(tier: RequiredTier): CatalogEntry[] {
