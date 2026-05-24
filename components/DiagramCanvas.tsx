@@ -134,11 +134,6 @@ function TopicNode({ id, data }: NodeProps) {
       }`}
     >
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      {isStub && !isExpanding && (
-        <span className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full bg-indigo-600 border border-indigo-400 text-white text-[9px] font-bold uppercase tracking-wide leading-none shadow">
-          +
-        </span>
-      )}
       {isExpanding
         ? (
           <span className="inline-flex items-center justify-center gap-1.5">
