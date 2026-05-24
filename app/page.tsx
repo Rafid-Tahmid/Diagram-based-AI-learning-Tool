@@ -26,12 +26,15 @@ type DbQAMessage = {
   role: string
   content: string
   diagram: unknown
+  sources: unknown
   createdAt: string
 }
 
 function dbMsgToMessage(row: DbQAMessage): Message {
   const classifications =
     Array.isArray(row.diagram) ? (row.diagram as QAClassification[]) : undefined
+  const sources =
+    Array.isArray(row.sources) ? (row.sources as import('@/lib/types').Source[]) : undefined
   return {
     id: row.id,
     // Defensive narrowing — anything that's not exactly 'user' is treated as
@@ -39,6 +42,7 @@ function dbMsgToMessage(row: DbQAMessage): Message {
     role: row.role === 'user' ? 'user' : 'assistant',
     content: row.content,
     classifications,
+    sources,
     offerDiagram: false,
     // Don't auto-accept the diagram on reload — we can't know if the user
     // accepted or declined. Classifications still render as info cards.

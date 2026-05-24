@@ -101,6 +101,7 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
         content: data.answer || '(no answer returned)',
         classifications: classifications.length > 0 ? classifications : undefined,
         offerDiagram: data.offerDiagram && classifications.length >= 3,
+        sources: data.sources && data.sources.length > 0 ? data.sources : undefined,
       }
       onMessagesChange([...next, reply])
     } catch (err) {
@@ -198,6 +199,25 @@ export default function NodePanel({ node, onClose, messages, onMessagesChange, a
                     <div className="px-3 py-2 rounded-xl rounded-bl-sm bg-slate-800 text-slate-200 text-sm leading-relaxed">
                       {msg.content}
                     </div>
+
+                    {msg.sources && msg.sources.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 px-1">
+                        {msg.sources.map(s => (
+                          <a
+                            key={s.n}
+                            href={s.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800/60 border border-slate-700 hover:border-slate-500 transition-colors group"
+                          >
+                            <span className="text-indigo-400 text-xs font-mono">[{s.n}]</span>
+                            <span className="text-slate-400 text-xs group-hover:text-slate-200 transition-colors truncate max-w-[160px]">
+                              {s.breadcrumb}
+                            </span>
+                          </a>
+                        ))}
+                      </div>
+                    )}
 
                     {msg.classifications && msg.classifications.length > 0 && (
                       <div className="space-y-2">
