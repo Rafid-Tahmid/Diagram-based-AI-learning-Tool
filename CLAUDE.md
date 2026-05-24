@@ -11,9 +11,9 @@ Clicking a node lazily generates its explanation and optional sub-diagram on dem
 Content is never generated until a user requests it.
 
 ## Stack
-- **Framework:** Next.js 14 (App Router) + TypeScript
+- **Framework:** Next.js 16 (App Router) + React 19 + TypeScript
 - **Diagrams:** React Flow (`@xyflow/react`)
-- **Database:** PostgreSQL via Prisma 5 + pgvector (RAG vector store)
+- **Database:** Neon (PostgreSQL 17 + pgvector) via Prisma 5
 - **AI:** Anthropic Claude (primary), multi-model routing via `lib/router.ts`
 - **Embeddings:** Google `gemini-embedding-001` (3072 dims) — required for RAG
 - **Styling:** Tailwind CSS
