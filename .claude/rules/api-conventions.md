@@ -48,11 +48,10 @@ All routes return consistent JSON:
 - `RAG_ENABLED` — `true` (default) or `false`. Master kill switch — when `false`, retrieve() always returns `groundingViable: false` and the app behaves identically to pre-RAG.
 - `RAG_TOP_K` — default `4`. Chunks per retrieval call.
 - `RAG_SCORE_THRESHOLD` — default `0.55`. Minimum cosine similarity for grounding to be considered viable.
-- `RAG_TIER` — `baseline` (default) or `cheap`. `baseline` keeps current model tiers on grounded calls (accuracy play); `cheap` drops to the cheap tier (cost play, only after eval).
 - `RAG_CONFIDENCE_RETRY` — `true` (default) or `false`. Retry once on a strong-tier model when the model self-flags `confidence: "low"`.
 - `RAG_EMBEDDING_PROVIDER` — `auto` (default), `openai`, or `google`. Auto-detect prefers Google over OpenAI (cheaper, separate quota from LLM calls).
-- `RAG_EMBEDDING_MODEL` — optional. Defaults: OpenAI → `text-embedding-3-small`, Google → `text-embedding-004`.
-- `RAG_EMBEDDING_DIM` — optional. Defaults: OpenAI → `1536`, Google → `768`. Must match the pgvector column declared in `prisma/sql/001_pgvector.sql`.
+- `RAG_EMBEDDING_MODEL` — optional. Defaults: OpenAI → `text-embedding-3-small`, Google → `gemini-embedding-001`.
+- `RAG_EMBEDDING_DIM` — optional. Defaults: OpenAI → `1536`, Google → `3072`. Must match the pgvector column declared in `prisma/sql/001_pgvector.sql`.
 
 ### Conventions
 - All vars live in `.env.local` (never committed to git)

@@ -61,6 +61,34 @@ function buildPath(targetId: string, allNodes: NodeInfo[]): NodeInfo[] {
   return path
 }
 
+// A node is hidden when any of its ancestors is collapsed.
+function hasCollapsedAncestor(
+  node: NodeInfo,
+  collapsedNodes: Set<string>,
+  byId: Map<string, NodeInfo>,
+): boolean {
+  let current = node.parentId ? byId.get(node.parentId) : undefined
+  while (current) {
+    if (collapsedNodes.has(current.id)) return true
+    current = current.parentId ? byId.get(current.parentId) : undefined
+  }
+  return false
+}
+
+function removeFromSet(set: Set<string>, id: string): Set<string> {
+  if (!set.has(id)) return set
+  const next = new Set(set)
+  next.delete(id)
+  return next
+}
+
+function addToSet(set: Set<string>, id: string): Set<string> {
+  if (set.has(id)) return set
+  const next = new Set(set)
+  next.add(id)
+  return next
+}
+
 class SessionMissingError extends Error {
   constructor() {
     super('Session not found')
@@ -68,14 +96,16 @@ class SessionMissingError extends Error {
   }
 }
 
-async function fetchSession(sessionId: string): Promise<DbNode[]> {
+async function fetchSession(sessionId: string): Promise<{ nodes: DbNode[]; domain: DomainId; topic: string }> {
   const res = await fetch(`/api/node?sessionId=${encodeURIComponent(sessionId)}`)
   if (res.status === 404) throw new SessionMissingError()
   const json: unknown = await res.json().catch(() => null)
   if (!res.ok || !json || typeof json !== 'object' || !('data' in json)) {
     throw new Error('Failed to load session')
   }
-  return (json as { data: DbNode[] }).data
+  const data = (json as { data: { nodes: DbNode[]; domain?: string; topic?: string } }).data
+  const domain = isDomainId(data.domain) ? data.domain : DEFAULT_DOMAIN
+  return { nodes: data.nodes, domain, topic: data.topic ?? '' }
 }
 
 async function fetchGenerate(topic: string, domain: DomainId): Promise<{ sessionId: string; nodes: DbNode[] }> {
@@ -143,6 +173,8 @@ export default function Home() {
   const [nodePath, setNodePath] = useState<NodeInfo[]>([])
   const [nodeMessages, setNodeMessages] = useState<Map<string, Message[]>>(new Map())
   const [expandingNodes, setExpandingNodes] = useState<Set<string>>(new Set())
+  // Nodes whose subtrees are hidden. A node is visible when none of its
+  // ancestors are collapsed. In-memory only — tree loads fully expanded.
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set())
   const [recentSessions, setRecentSessions] = useState<DbSession[]>([])
   const [showHistory, setShowHistory] = useState(false)
@@ -162,10 +194,12 @@ export default function Home() {
     const savedId = localStorage.getItem(SESSION_KEY)
     const work: Promise<void> = savedId
       ? fetchSession(savedId)
-          .then(dbNodes => {
+          .then(({ nodes: dbNodes, domain: sessionDomain, topic }) => {
             if (cancelled) return
             const infos = dbNodes.map(dbNodeToInfo)
             setNodes(infos)
+            setDomain(sessionDomain)
+            if (topic) setInputValue(topic)
             const root = infos.find(n => n.parentId === null)
             if (root) {
               setSelectedNode(root)
@@ -239,29 +273,22 @@ export default function Home() {
     }
   }, [showHistory])
 
-  const childCountByParent = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const n of nodes) {
-      if (n.parentId) m.set(n.parentId, (m.get(n.parentId) ?? 0) + 1)
-    }
-    return m
-  }, [nodes])
 
-  // A node is hidden when any of its ancestors is collapsed. The collapsed
-  // node itself stays visible (so you can click it again to re-expand).
+  // A node shows unless one of its ancestors is collapsed.
   const visibleNodes = useMemo(() => {
-    if (collapsedNodes.size === 0) return nodes
     const byId = new Map(nodes.map(n => [n.id, n]))
-    const hiddenByAncestor = (n: NodeInfo): boolean => {
-      let p = n.parentId ? byId.get(n.parentId) : undefined
-      while (p) {
-        if (collapsedNodes.has(p.id)) return true
-        p = p.parentId ? byId.get(p.parentId) : undefined
-      }
-      return false
-    }
-    return nodes.filter(n => !hiddenByAncestor(n))
+    return nodes.filter(n => !hasCollapsedAncestor(n, collapsedNodes, byId))
   }, [nodes, collapsedNodes])
+
+  // Direct-child count per node, computed from the full tree (not just the
+  // visible subset) so a collapsed node still knows how many children it hides.
+  const childCountByNode = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const n of nodes) {
+      if (n.parentId) counts.set(n.parentId, (counts.get(n.parentId) ?? 0) + 1)
+    }
+    return counts
+  }, [nodes])
 
   const edges = useMemo(
     () =>
@@ -313,7 +340,7 @@ export default function Home() {
     } finally {
       if (sessionVersionRef.current === startVersion) setLoading(false)
     }
-  }, [inputValue, loading])
+  }, [inputValue, loading, domain])
 
   const handleLoadSession = useCallback(async (sessionId: string, topic: string, sessionDomain: DomainId = DEFAULT_DOMAIN) => {
     if (loading) return
@@ -332,9 +359,11 @@ export default function Home() {
     setInputValue(topic)
     setDomain(sessionDomain)
     try {
-      const dbNodes = await fetchSession(sessionId)
+      const { nodes: dbNodes, domain: sessionDomain, topic: sessionTopic } = await fetchSession(sessionId)
       if (sessionVersionRef.current !== startVersion) return
       localStorage.setItem(SESSION_KEY, sessionId)
+      setDomain(sessionDomain)
+      if (sessionTopic) setInputValue(sessionTopic)
       const infos = dbNodes.map(dbNodeToInfo)
       setNodes(infos)
       const root = infos.find(n => n.parentId === null)
@@ -350,21 +379,20 @@ export default function Home() {
     }
   }, [loading])
 
+  // Plain click selects the node (and opens its panel). A stub also triggers
+  // generation of its children. Expand/collapse of an already-generated subtree
+  // is a separate action (the chevron toggle) so reading a node never hides it.
   const handleNodeClick = useCallback(async (node: NodeInfo) => {
     setSelectedNode(node)
     setNodePath(buildPath(node.id, nodes))
 
-    // Already-generated node with children: toggle its subtree visibility.
-    // Children are already in state/DB, so re-expanding never calls the AI.
     if (node.status !== 'stub') {
-      const hasChildren = nodes.some(n => n.parentId === node.id)
-      if (hasChildren) {
-        setCollapsedNodes(prev => {
-          const next = new Set(prev)
-          if (next.has(node.id)) next.delete(node.id)
-          else next.add(node.id)
-          return next
-        })
+      // For generated nodes with children, clicking the body toggles the subtree.
+      // The chevron button already stopPropagation's so this won't double-fire.
+      if (nodes.some(n => n.parentId === node.id)) {
+        setCollapsedNodes(prev =>
+          prev.has(node.id) ? removeFromSet(prev, node.id) : addToSet(prev, node.id)
+        )
       }
       return
     }
@@ -389,6 +417,8 @@ export default function Home() {
       const childInfos = children.map(dbNodeToInfo)
 
       setNodes(prev => [...prev.map(n => n.id === node.id ? updatedInfo : n), ...childInfos])
+      // Make sure the freshly expanded node shows its new children.
+      setCollapsedNodes(prev => removeFromSet(prev, node.id))
       // Only refresh selection/path if the user is still looking at the same node.
       // Otherwise a late-arriving expansion would clobber their new selection.
       setSelectedNode(current => current?.id === node.id ? updatedInfo : current)
@@ -404,12 +434,30 @@ export default function Home() {
         return next
       })
     }
-  }, [nodes])
+  }, [nodes, domain])
+
+  const handleToggleCollapse = useCallback((nodeId: string) => {
+    setCollapsedNodes(prev =>
+      prev.has(nodeId) ? removeFromSet(prev, nodeId) : addToSet(prev, nodeId),
+    )
+  }, [])
 
   const handleBreadcrumbNavigate = useCallback((node: NodeInfo, index: number) => {
     setNodePath(prev => prev.slice(0, index + 1))
     setSelectedNode(node)
-  }, [])
+    // Ensure the target is visible by un-collapsing all of its ancestors.
+    setCollapsedNodes(prev => {
+      if (prev.size === 0) return prev
+      const byId = new Map(nodes.map(n => [n.id, n]))
+      const next = new Set(prev)
+      let ancestor = node.parentId ? byId.get(node.parentId) : undefined
+      while (ancestor) {
+        next.delete(ancestor.id)
+        ancestor = ancestor.parentId ? byId.get(ancestor.parentId) : undefined
+      }
+      return next.size === prev.size ? prev : next
+    })
+  }, [nodes])
 
   const handleClose = useCallback(() => {
     setSelectedNode(null)
@@ -570,10 +618,11 @@ export default function Home() {
                 edges={edges}
                 selectedNodeId={selectedNode?.id ?? null}
                 onNodeClick={handleNodeClick}
+                onToggleCollapse={handleToggleCollapse}
                 needsDiagram={rootNeedsDiagram}
                 expandingNodeIds={expandingNodes}
+                childCountByNode={childCountByNode}
                 collapsedNodeIds={collapsedNodes}
-                childCountByParent={childCountByParent}
               />
             )}
           </div>

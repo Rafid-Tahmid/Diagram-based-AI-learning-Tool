@@ -1,12 +1,16 @@
 'use client'
 
-import { useEffect, useCallback, useMemo, useRef } from 'react'
+import { useEffect, useCallback, useMemo, useRef, createContext, useContext } from 'react'
 import {
   ReactFlow, Background, Controls, Handle, Position,
   useNodesState, type NodeProps, type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { NodeInfo } from '@/lib/types'
+
+// Lets the React Flow-rendered TopicNode reach the parent's collapse handler
+// without threading a function through node data (which churns on every patch).
+const ToggleCollapseContext = createContext<(id: string) => void>(() => {})
 
 const NODE_WIDTH = 160
 const NODE_GAP = 40
@@ -68,18 +72,19 @@ function nodeData(
   node: NodeInfo,
   selectedNodeId: string | null,
   expandingNodeIds: Set<string>,
+  childCountByNode: Map<string, number>,
   collapsedNodeIds: Set<string>,
-  childCountByParent: Map<string, number>
 ) {
-  const isCollapsed = collapsedNodeIds.has(node.id)
+  const childCount = childCountByNode.get(node.id) ?? 0
   return {
     label: node.label,
     isRoot: node.parentId === null,
     isSelected: node.id === selectedNodeId,
     isStub: node.status === 'stub',
     isExpanding: expandingNodeIds.has(node.id),
-    isCollapsed,
-    hiddenCount: isCollapsed ? (childCountByParent.get(node.id) ?? 0) : 0,
+    hasChildren: childCount > 0,
+    isCollapsed: collapsedNodeIds.has(node.id),
+    childCount,
   }
 }
 
@@ -87,25 +92,27 @@ function buildFlowNodes(
   nodes: NodeInfo[],
   selectedNodeId: string | null,
   expandingNodeIds: Set<string>,
+  childCountByNode: Map<string, number>,
   collapsedNodeIds: Set<string>,
-  childCountByParent: Map<string, number>
 ) {
   const positions = computeLayout(nodes)
   return nodes.map(node => ({
     id: node.id,
     type: 'topicNode',
     position: positions.get(node.id) ?? { x: 0, y: 0 },
-    data: nodeData(node, selectedNodeId, expandingNodeIds, collapsedNodeIds, childCountByParent),
+    data: nodeData(node, selectedNodeId, expandingNodeIds, childCountByNode, collapsedNodeIds),
   }))
 }
 
-function TopicNode({ data }: NodeProps) {
+function TopicNode({ id, data }: NodeProps) {
+  const onToggleCollapse = useContext(ToggleCollapseContext)
   const isRoot = data.isRoot as boolean
   const isSelected = data.isSelected as boolean
   const isStub = data.isStub as boolean
   const isExpanding = data.isExpanding as boolean
+  const hasChildren = data.hasChildren as boolean
   const isCollapsed = data.isCollapsed as boolean
-  const hiddenCount = data.hiddenCount as number
+  const childCount = data.childCount as number
   const label = data.label as string
 
   return (
@@ -127,6 +134,11 @@ function TopicNode({ data }: NodeProps) {
       }`}
     >
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      {isStub && !isExpanding && (
+        <span className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full bg-indigo-600 border border-indigo-400 text-white text-[9px] font-bold uppercase tracking-wide leading-none shadow">
+          +
+        </span>
+      )}
       {isExpanding
         ? (
           <span className="inline-flex items-center justify-center gap-1.5">
@@ -136,10 +148,25 @@ function TopicNode({ data }: NodeProps) {
         )
         : label
       }
-      {isCollapsed && (
-        <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-indigo-600 border border-indigo-400 text-white text-[10px] font-bold leading-none shadow">
-          +{hiddenCount}
-        </div>
+      {hasChildren && !isExpanding && (
+        <button
+          onClick={e => { e.stopPropagation(); onToggleCollapse(id) }}
+          className={`absolute -bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1 rounded-full border text-[10px] font-bold leading-none shadow-md transition-colors ${
+            isCollapsed
+              ? 'bg-indigo-600 border-indigo-400 text-white hover:bg-indigo-500'
+              : 'bg-slate-700 border-slate-500 text-slate-200 hover:bg-slate-600 hover:border-slate-400'
+          }`}
+          aria-label={isCollapsed ? `Expand ${childCount} children` : 'Collapse children'}
+          title={isCollapsed ? `Expand (${childCount})` : 'Collapse'}
+        >
+          <svg
+            className={`w-2.5 h-2.5 transition-transform ${isCollapsed ? '' : 'rotate-180'}`}
+            fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
+          </svg>
+          {isCollapsed && childCount}
+        </button>
       )}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
@@ -156,18 +183,19 @@ type Props = {
   edges: DiagramEdge[]
   selectedNodeId: string | null
   onNodeClick: (node: NodeInfo) => void
+  onToggleCollapse?: (id: string) => void
   needsDiagram?: boolean
   expandingNodeIds?: Set<string>
+  childCountByNode?: Map<string, number>
   collapsedNodeIds?: Set<string>
-  childCountByParent?: Map<string, number>
 }
 
 export default function DiagramCanvas({
-  nodes, edges, selectedNodeId, onNodeClick, needsDiagram = true,
-  expandingNodeIds = new Set(), collapsedNodeIds = new Set(), childCountByParent = new Map(),
+  nodes, edges, selectedNodeId, onNodeClick, onToggleCollapse = () => {}, needsDiagram = true,
+  expandingNodeIds = new Set(), childCountByNode = new Map(), collapsedNodeIds = new Set(),
 }: Props) {
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(
-    buildFlowNodes(nodes, selectedNodeId, expandingNodeIds, collapsedNodeIds, childCountByParent)
+    buildFlowNodes(nodes, selectedNodeId, expandingNodeIds, childCountByNode, collapsedNodeIds)
   )
 
   // Track which node ids we've already laid out so re-renders don't reset
@@ -190,7 +218,7 @@ export default function DiagramCanvas({
         return prev.map(fn => {
           const src = byId.get(fn.id)
           if (!src) return fn
-          const isCollapsed = collapsedNodeIds.has(src.id)
+          const childCount = childCountByNode.get(src.id) ?? 0
           return {
             ...fn,
             data: {
@@ -198,8 +226,9 @@ export default function DiagramCanvas({
               label: src.label,
               isStub: src.status === 'stub',
               isExpanding: expandingNodeIds.has(src.id),
-              isCollapsed,
-              hiddenCount: isCollapsed ? (childCountByParent.get(src.id) ?? 0) : 0,
+              hasChildren: childCount > 0,
+              isCollapsed: collapsedNodeIds.has(src.id),
+              childCount,
             },
           }
         })
@@ -216,14 +245,14 @@ export default function DiagramCanvas({
         id: node.id,
         type: 'topicNode',
         position: prevPosById.get(node.id) ?? positions.get(node.id) ?? { x: 0, y: 0 },
-        data: nodeData(node, selectedNodeId, expandingNodeIds, collapsedNodeIds, childCountByParent),
+        data: nodeData(node, selectedNodeId, expandingNodeIds, childCountByNode, collapsedNodeIds),
       }))
     })
     knownIdsRef.current = currentIds
   // selectedNodeId is intentionally excluded; selection updates run in a
   // separate effect to avoid touching positions or data on every click.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, expandingNodeIds, collapsedNodeIds, childCountByParent])
+  }, [nodes, expandingNodeIds, childCountByNode, collapsedNodeIds])
 
   useEffect(() => {
     setFlowNodes(prev =>
@@ -246,20 +275,22 @@ export default function DiagramCanvas({
 
   return (
     <div className="w-full h-full relative">
-      <ReactFlow
-        nodes={flowNodes}
-        edges={flowEdges}
-        nodeTypes={nodeTypes}
-        onNodesChange={onNodesChange}
-        nodesConnectable={false}
-        onNodeClick={handleNodeClick}
-        fitView
-        fitViewOptions={{ padding: 0.25 }}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background color="#1e293b" gap={24} />
-        <Controls />
-      </ReactFlow>
+      <ToggleCollapseContext.Provider value={onToggleCollapse}>
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          nodeTypes={nodeTypes}
+          onNodesChange={onNodesChange}
+          nodesConnectable={false}
+          onNodeClick={handleNodeClick}
+          fitView
+          fitViewOptions={{ padding: 0.25 }}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background color="#1e293b" gap={24} />
+          <Controls />
+        </ReactFlow>
+      </ToggleCollapseContext.Provider>
 
       {!needsDiagram && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-slate-800/80 border border-slate-700 text-slate-400 text-xs pointer-events-none">
