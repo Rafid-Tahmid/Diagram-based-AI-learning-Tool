@@ -2,13 +2,35 @@
 
 :root {
   color-scheme: dark;
-  --background: #020617;
-  --foreground: #e6edf6;
+
+  /* Surfaces — short ladder, one elevated tone */
+  --bg:                #0a0b0f;
+  --surface:           #14161c;
+  --surface-2:         #1a1d25;
+  --hairline:          rgba(255, 255, 255, 0.06);
+  --hairline-strong:   rgba(255, 255, 255, 0.10);
+
+  /* Text */
+  --fg:                #e9eaf0;
+  --fg-muted:          #a4a7b2;
+  --fg-faint:          #6a6e7a;
+
+  /* Accent + warm secondary */
+  --accent:            oklch(0.62 0.19 270);
+  --accent-soft:       color-mix(in oklch, oklch(0.62 0.19 270) 22%, transparent);
+  --accent-faint:      color-mix(in oklch, oklch(0.62 0.19 270) 12%, transparent);
+  --accent-text:       color-mix(in oklch, oklch(0.62 0.19 270) 70%, white);
+  --accent-border:     color-mix(in oklch, oklch(0.62 0.19 270) 35%, transparent);
+
+  --warm:              oklch(0.74 0.12 75);
+  --warm-text:         color-mix(in oklch, oklch(0.74 0.12 75) 60%, white);
+  --warm-soft:         color-mix(in oklch, oklch(0.74 0.12 75) 12%, transparent);
+  --warm-border:       color-mix(in oklch, oklch(0.74 0.12 75) 25%, transparent);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -18,40 +40,103 @@ html {
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--bg);
+  color: var(--fg);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.005em;
 }
 
-/* Dark scrollbars so native UI matches the theme instead of rendering light. */
+/* Dark scrollbars matching the surface ladder */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #475569 transparent;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
 }
-*::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-*::-webkit-scrollbar-track {
-  background: transparent;
-}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb {
-  background: #475569;
+  background: rgba(255,255,255,0.08);
   border-radius: 9999px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
 }
-*::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
-  background-clip: padding-box;
-}
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.16); }
 
-/* Keep autofilled inputs dark — the browser's default light-yellow fill makes
-   the foreground text invisible against the dark theme. */
+/* Keep autofilled inputs on-theme */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus {
-  -webkit-text-fill-color: #e6edf6;
-  -webkit-box-shadow: 0 0 0 1000px #1e293b inset;
-  caret-color: #e6edf6;
+  -webkit-text-fill-color: var(--fg);
+  -webkit-box-shadow: 0 0 0 1000px var(--surface-2) inset;
+  caret-color: var(--fg);
 }
+
+/* React Flow attribution + controls — bring them onto our palette */
+.react-flow__attribution { display: none; }
+.react-flow__controls {
+  background: var(--surface) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  box-shadow: none !important;
+}
+.react-flow__controls button {
+  background: transparent !important;
+  border-bottom: 1px solid var(--hairline) !important;
+  color: var(--fg-muted) !important;
+  fill: var(--fg-muted) !important;
+}
+.react-flow__controls button:hover {
+  background: var(--surface-2) !important;
+  color: var(--fg) !important;
+  fill: var(--fg) !important;
+}
+.react-flow__controls button:last-child { border-bottom: none !important; }
+
+/* Background dot pattern color */
+.react-flow__background-pattern { color: rgba(255,255,255,0.04); }
+
+/* ─────────────────────── Light theme overrides ────────────────────────── */
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:                #f8fafc;
+  --surface:           #ffffff;
+  --surface-2:         #f1f5f9;
+  --hairline:          rgba(0, 0, 0, 0.07);
+  --hairline-strong:   rgba(0, 0, 0, 0.12);
+
+  --fg:                #0f172a;
+  --fg-muted:          #475569;
+  --fg-faint:          #94a3b8;
+
+  --accent:            oklch(0.52 0.19 270);
+  --accent-soft:       color-mix(in oklch, oklch(0.52 0.19 270) 12%, transparent);
+  --accent-faint:      color-mix(in oklch, oklch(0.52 0.19 270) 7%, transparent);
+  --accent-text:       oklch(0.42 0.19 270);
+  --accent-border:     color-mix(in oklch, oklch(0.52 0.19 270) 35%, transparent);
+
+  --warm:              oklch(0.60 0.12 75);
+  --warm-text:         oklch(0.48 0.12 75);
+  --warm-soft:         color-mix(in oklch, oklch(0.60 0.12 75) 10%, transparent);
+  --warm-border:       color-mix(in oklch, oklch(0.60 0.12 75) 20%, transparent);
+}
+
+[data-theme="light"] * {
+  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+[data-theme="light"] *::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+}
+[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.20);
+}
+
+[data-theme="light"] .react-flow__background-pattern { color: rgba(0, 0, 0, 0.06); }
+
+/* Ghost diagram — override hardcoded white rgba values */
+[data-theme="light"] .ghost-diagram-lines { stroke: rgba(0, 0, 0, 0.07); }
+[data-theme="light"] .ghost-diagram-rects { stroke: rgba(0, 0, 0, 0.08); }
+[data-theme="light"] #ghostFade stop:first-child { stop-color: rgba(0, 0, 0, 0.03); }
+[data-theme="light"] #ghostFade stop:last-child  { stop-color: rgba(0, 0, 0, 0); }

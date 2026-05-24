@@ -12,13 +12,13 @@ export default function Breadcrumb({ path, onNavigate }: Props) {
         const isLast = i === path.length - 1
         return (
           <span key={node.id} className="flex items-center gap-1">
-            {i > 0 && <span className="text-slate-500 select-none">›</span>}
+            {i > 0 && <span className="text-[var(--fg-faint)] select-none">›</span>}
             {isLast ? (
-              <span className="px-1 py-0.5 text-slate-100 font-medium">{node.label}</span>
+              <span className="px-1.5 py-0.5 text-[var(--fg)] font-medium">{node.label}</span>
             ) : (
               <button
                 onClick={() => onNavigate(node, i)}
-                className="px-1 py-0.5 rounded text-slate-400 hover:text-slate-200 transition-colors"
+                className="px-1.5 py-0.5 rounded text-[var(--fg-muted)] hover:text-[var(--fg)] hover:bg-[var(--surface)] transition-colors"
               >
                 {node.label}
               </button>
