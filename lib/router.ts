@@ -1,6 +1,7 @@
 import { ragConfig } from '@/lib/ragConfig'
 
 export type TaskType = 'root' | 'expand' | 'qa'
+export type ProviderName = 'anthropic' | 'openai' | 'google'
 
 export type RouteInput = {
   taskType: TaskType
@@ -14,7 +15,7 @@ export type RouteInput = {
 }
 
 export type ModelChoice = {
-  provider: 'anthropic' | 'google' | 'openai'
+  provider: ProviderName
   model: string
 }
 
@@ -28,47 +29,188 @@ export type ProviderCallArgs = {
   timeoutMs?: number
 }
 
-const SONNET: ModelChoice = { provider: 'anthropic', model: 'claude-sonnet-4-6' }
-const HAIKU: ModelChoice = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }
-const FLASH: ModelChoice = { provider: 'google', model: 'gemini-2.0-flash' }
+// ─── provider availability ───────────────────────────────────────────────────
+//
+// Detected at module load from env vars. Re-detection requires a restart,
+// which is what we want — provider availability is config, not state.
+//
+// Anthropic is the documented default. If only one provider is configured,
+// every routing decision degenerates to that provider's models. The app must
+// be usable with just ANTHROPIC_API_KEY and nothing else.
 
-export function pickModel(input: RouteInput): ModelChoice {
+const PROVIDER_KEYS: Record<ProviderName, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_AI_API_KEY',
+}
+
+function detectProviders(): Set<ProviderName> {
+  const set = new Set<ProviderName>()
+  for (const [provider, envVar] of Object.entries(PROVIDER_KEYS) as [ProviderName, string][]) {
+    if (process.env[envVar]) set.add(provider)
+  }
+  return set
+}
+
+const availableProviders = detectProviders()
+
+export function isProviderAvailable(p: ProviderName): boolean {
+  return availableProviders.has(p)
+}
+
+export function listAvailableProviders(): ProviderName[] {
+  return [...availableProviders]
+}
+
+// ─── model catalog ───────────────────────────────────────────────────────────
+//
+// Tiered list of every model the app knows how to call. `costRank` is an
+// ordinal — lower means cheaper — used as the primary sort key when picking
+// the "cheap but best" candidate within a tier. The ranks are deliberately
+// stable: even if the absolute prices shift, the relative ordering between
+// these specific models is what the router cares about.
+//
+// To add a new provider: add an entry here, add the provider key to
+// PROVIDER_KEYS above, and add a callJson wrapper under lib/providers/.
+
+type CatalogEntry = ModelChoice & {
+  tier: 'cheap' | 'strong'
+  costRank: number
+  // True when the model is a good fit for long-context tasks (Q&A with deep
+  // history, deep ancestor paths). The current router only consults this for
+  // the long-context Q&A path, but it's typed so future heuristics can use it.
+  longContext: boolean
+}
+
+const CATALOG: readonly CatalogEntry[] = Object.freeze([
+  // strong tier — best-quality models, prefer for root + ungrounded Q&A
+  { provider: 'anthropic', model: 'claude-sonnet-4-6',           tier: 'strong', costRank: 5, longContext: true },
+  { provider: 'openai',    model: 'gpt-4o',                      tier: 'strong', costRank: 4, longContext: true },
+  { provider: 'google',    model: 'gemini-2.5-pro',              tier: 'strong', costRank: 3, longContext: true },
+
+  // cheap tier — used for structural tasks (expand, grounded Q&A under cheap
+  // tier, long-history Q&A) where good-enough is enough.
+  { provider: 'anthropic', model: 'claude-haiku-4-5-20251001',   tier: 'cheap',  costRank: 3, longContext: true },
+  { provider: 'openai',    model: 'gpt-4o-mini',                 tier: 'cheap',  costRank: 2, longContext: true },
+  { provider: 'google',    model: 'gemini-2.0-flash',            tier: 'cheap',  costRank: 1, longContext: true },
+])
+
+// ─── selection logic ────────────────────────────────────────────────────────
+
+// Multi-provider mode is OPT-IN. The documented default is Claude — when
+// Anthropic is available, pickModel restricts the candidate pool to Anthropic
+// models. Set ROUTER_MULTI_PROVIDER=true to enable cost-ranked selection
+// across every configured provider (Stage 6 path; lets a publisher with
+// multiple keys get automatic cheap-but-best routing).
+//
+// If Anthropic isn't configured at all, this flag is ignored and the router
+// falls through to cost-ranked across whatever providers ARE available.
+const MULTI_PROVIDER = (process.env.ROUTER_MULTI_PROVIDER ?? 'false').toLowerCase() === 'true'
+
+type RequiredTier = 'cheap' | 'strong'
+
+function requiredTier(input: RouteInput): RequiredTier {
   switch (input.taskType) {
     case 'root':
-      // First impression — quality matters more than cost; one call per session.
-      // Root skips retrieval (taxonomy task), so `grounded` is irrelevant here.
-      return SONNET
+      // First impression — quality matters more than cost. One call per session.
+      return 'strong'
 
     case 'expand':
-      // Expand routing is structural in either tier. The choice between Haiku
-      // and Flash is driven by ancestor-path length, not by grounding — even
-      // when ragConfig.tier='cheap'.
-      if (input.depth >= 4) return FLASH
-      return HAIKU
+      // Structural — produce a description + child titles from an ancestor path.
+      // Even ungrounded, cheap-tier models do this well.
+      return 'cheap'
 
     case 'qa':
-      // Q&A is the call where ragConfig.tier and `grounded` actually matter.
-      //
-      // - baseline + grounded:    Sonnet sees the chunks (pure accuracy win, Stage 1)
-      // - baseline + ungrounded:  Sonnet as today
-      // - cheap + grounded:       Haiku/Flash — chunks do the recall (Stage 2)
-      // - cheap + ungrounded:     fall back to Sonnet so a retrieval miss doesn't
-      //                           land on a small model with no grounding
-      if (ragConfig.tier === 'cheap' && input.grounded) {
-        // Long history is still cheaper on Flash than Haiku, and Flash has
-        // more headroom for the combined chunks + history payload.
-        return input.historyLen >= 10 ? FLASH : HAIKU
-      }
-      if (input.historyLen >= 10) return FLASH
-      return SONNET
+      // The interesting case. Four sub-cases:
+      // 1. grounded + ragConfig.tier='cheap'  → cheap (chunks do the recall, Stage 2)
+      // 2. grounded + ragConfig.tier='baseline' → strong (Stage 1 — accuracy play)
+      // 3. ungrounded + long history → cheap (cap conversation cost)
+      // 4. ungrounded + short history → strong (nuanced Q&A)
+      if (input.grounded && ragConfig.tier === 'cheap') return 'cheap'
+      if (!input.grounded && input.historyLen >= 10) return 'cheap'
+      return 'strong'
   }
 }
 
-// On retry: promote to the next stronger tier. If already on Sonnet, bubble the error.
+function candidatesForTier(tier: RequiredTier): CatalogEntry[] {
+  // Anthropic-first when (a) multi-provider isn't explicitly enabled AND
+  // (b) Anthropic is actually configured. Otherwise: cost-ranked across
+  // all available providers.
+  const restrictToAnthropic = !MULTI_PROVIDER && availableProviders.has('anthropic')
+  const pool: Set<ProviderName> = restrictToAnthropic
+    ? new Set<ProviderName>(['anthropic'])
+    : availableProviders
+  return CATALOG
+    .filter(c => c.tier === tier && pool.has(c.provider))
+    .slice()
+    .sort((a, b) => a.costRank - b.costRank)
+}
+
+// User overrides: a publisher / power user can pin a specific model for any
+// task type. Format: provider/model, e.g. "anthropic/claude-sonnet-4-6".
+// Invalid pins are ignored with a warning so a misconfigured deployment
+// degrades gracefully to auto-routing rather than refusing to start.
+const OVERRIDE_ENV: Record<TaskType, string> = {
+  root: 'MODEL_ROOT',
+  expand: 'MODEL_EXPAND',
+  qa: 'MODEL_QA',
+}
+
+function parseOverride(taskType: TaskType): ModelChoice | null {
+  const raw = process.env[OVERRIDE_ENV[taskType]]
+  if (!raw) return null
+  const [provider, ...rest] = raw.split('/')
+  const model = rest.join('/')
+  if (!provider || !model) {
+    console.warn(`Ignoring ${OVERRIDE_ENV[taskType]}=${raw}: expected "provider/model"`)
+    return null
+  }
+  if (provider !== 'anthropic' && provider !== 'openai' && provider !== 'google') {
+    console.warn(`Ignoring ${OVERRIDE_ENV[taskType]}=${raw}: unknown provider "${provider}"`)
+    return null
+  }
+  if (!availableProviders.has(provider)) {
+    console.warn(`Ignoring ${OVERRIDE_ENV[taskType]}=${raw}: ${PROVIDER_KEYS[provider]} not set`)
+    return null
+  }
+  return { provider, model }
+}
+
+function pickFromCatalog(tier: RequiredTier): ModelChoice {
+  const candidates = candidatesForTier(tier)
+  if (candidates.length > 0) {
+    const choice = candidates[0]
+    return { provider: choice.provider, model: choice.model }
+  }
+  // Tier had no available match (e.g. only Anthropic configured but we need
+  // 'cheap' — falls through to Haiku since Anthropic has a cheap-tier model).
+  // Defensive fallback: if even that fails, try the other tier so the call
+  // doesn't blow up. The catalog guarantees Anthropic has both tiers, so this
+  // only fires if every provider is missing.
+  const fallback = CATALOG.find(c => availableProviders.has(c.provider))
+  if (fallback) return { provider: fallback.provider, model: fallback.model }
+
+  throw new Error(
+    `No model providers configured. Set at least one of: ${Object.values(PROVIDER_KEYS).join(', ')}`,
+  )
+}
+
+export function pickModel(input: RouteInput): ModelChoice {
+  const override = parseOverride(input.taskType)
+  if (override) return override
+  return pickFromCatalog(requiredTier(input))
+}
+
+// Promote: on a retriable error, escalate to the strong tier so the retry has
+// a better chance of succeeding (and bypasses a transient cheap-model outage).
+// If we're already on the strong tier, return the same choice — withRetry
+// detects the no-op and bubbles the error.
 export function promote(choice: ModelChoice): ModelChoice {
-  if (choice.model === HAIKU.model) return SONNET
-  if (choice.provider === 'google') return SONNET
-  return choice
+  const isStrong = CATALOG.some(
+    c => c.provider === choice.provider && c.model === choice.model && c.tier === 'strong',
+  )
+  if (isStrong) return choice
+  return pickFromCatalog('strong')
 }
 
 // Decide whether an error from a provider is worth retrying. Retry transient

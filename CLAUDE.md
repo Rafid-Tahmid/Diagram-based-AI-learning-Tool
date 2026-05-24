@@ -342,20 +342,30 @@ swappable via config without touching call sites.
   on `QAMessage`). Vector column + HNSW cosine index added via raw SQL in
   `prisma/sql/001_pgvector.sql` (Prisma 5 doesn't natively type the `vector` column).
 - `lib/ragConfig.ts` — central env-driven tunables (topK, scoreThreshold, tier,
-  embedding provider/model, retrieval enabled, confidence-retry on/off).
+  retrieval enabled, confidence-retry on/off). Embedding provider auto-detected:
+  `RAG_EMBEDDING_PROVIDER=auto` (default) prefers Google over OpenAI, returns
+  `null` if neither key is set. Model and dim default from a provider-keyed
+  lookup table; both overridable per env.
 - `lib/embeddings.ts` — pluggable embedding provider with OpenAI + Gemini wrappers,
-  lazy clients (same pattern as `lib/providers/*`), per-call timeout.
+  lazy clients (same pattern as `lib/providers/*`), per-call timeout. Throws with
+  a clear message when called without an available provider.
 - `lib/retrieval.ts` — `retrieve(query)` returns `{ chunks, topScore, groundingViable }`.
-  Empty-corpus safe: returns `groundingViable: false` when no chunks exist or top
-  score is below threshold, so the rest of the app degrades gracefully to the
-  ungrounded path.
-- `lib/router.ts` — `RouteInput` extended with `grounded?: boolean`. `pickModel()`
-  consults `ragConfig.tier`: `baseline` keeps existing models (Stage 1 default,
-  pure accuracy play); `cheap` drops Q&A and expand to Haiku/Flash (Stage 2).
+  Empty-corpus / no-embedding-provider / score-too-low / error → returns
+  `groundingViable: false`, app degrades to ungrounded. One-time info notice
+  when no embedding provider is configured (Anthropic-only deploys).
+- `lib/router.ts` — provider availability auto-detected at module load. Tiered
+  model catalog (`cheap` / `strong` × Anthropic / OpenAI / Google) with cost-ranked
+  selection. `RouteInput.grounded?: boolean`. `pickModel()` filters the catalog
+  by required tier + available providers, returns the cheapest match. `promote()`
+  returns the strongest available, not a hardcoded Sonnet. `MODEL_ROOT` /
+  `MODEL_EXPAND` / `MODEL_QA` env overrides bypass auto-routing.
+  `ROUTER_MULTI_PROVIDER=false` forces Anthropic-only even when other keys are set.
 - `lib/ai.ts` — `generateNode` (expand only) and `answerQuestion` retrieve first,
   prepend a sources block to the system prompt when viable, and ask the model to
   return `confidence` + `sourcesCited`. On `confidence: "low"` (when enabled), one
-  explicit retry on ungrounded Sonnet. Source metadata flows back in the response.
+  explicit retry on the strongest available model with an ungrounded prompt
+  (skipped if we're already on a strong-tier model). Source metadata flows back
+  in the response.
 - Updated `QAResponse` and `GenerateResponse` types to carry `sources` and `confidence`.
 
 **Do NOT build yet (other stages):**
@@ -533,3 +543,52 @@ Next up within Phase 6: Stage 3 (ingestion pipeline + first corpus).
   Optional column, `undefined` to skip (avoids the `Prisma.JsonNull` sentinel).
 - **All new env vars have defaults.** `lib/ragConfig.ts` parses `RAG_*` env vars
   with safe fallbacks; an unset env is "use Stage 1 defaults", never a crash.
+
+**Phase 6 — multi-provider router refactor:**
+- **Anthropic is the only required provider.** OpenAI and Google keys are
+  optional. An Anthropic-only deploy must work end-to-end — the app is
+  designed to be forkable for OSS publication where downstream users may
+  only configure one key.
+- **`lib/router.ts` auto-detects available providers at module load** (any
+  key set → provider in the pool). New deployments don't have to touch
+  router code to choose providers; setting env vars is enough.
+- **Replaced hardcoded model picks with a tiered catalog.** Each model has a
+  `tier` (`cheap` | `strong`) and a `costRank`. `pickModel` filters the
+  catalog by required tier + available providers, sorts by costRank, picks
+  the cheapest. This is the "cheap but best for the task" logic — the model
+  decision is driven by task structure (taskType/depth/historyLen/grounded),
+  not the question text. Question-classification routing is out of scope.
+- **Adding a new provider is one file, three edits**: add a row to `CATALOG`
+  in `lib/router.ts`, add the key to `PROVIDER_KEYS`, add a `callJson`
+  wrapper under `lib/providers/`. No call-site changes.
+- **`ROUTER_MULTI_PROVIDER=true` is OPT-IN.** Default is `false` — Anthropic
+  preferred when configured. The reasoning: "default is Claude" means Claude
+  should be the model an unconfigured fork lands on, even if the publisher
+  happened to also set OPENAI_API_KEY / GOOGLE_AI_API_KEY for embeddings or
+  future use. Cost-ranked multi-provider routing is a deliberate choice the
+  publisher makes by flipping the flag. If Anthropic isn't configured, the
+  flag is moot — the router cost-ranks across whatever IS available so an
+  OpenAI-only or Gemini-only deploy still works.
+- **Per-task overrides** via `MODEL_ROOT` / `MODEL_EXPAND` / `MODEL_QA` env
+  vars in `provider/model` format. Invalid pins are logged and ignored —
+  misconfigured deployments degrade to auto-routing rather than refusing
+  to start.
+- **`promote()` is now multi-provider-aware.** It picks the strongest
+  available model rather than hardcoded Sonnet. Retry on a missing-Anthropic
+  deploy (e.g. OpenAI-only) now correctly escalates to GPT-4o, not nothing.
+- **`SONNET_FALLBACK` hardcode removed from `lib/ai.ts`.** Confidence-retry
+  now calls `promote(choice)` which returns the same choice when already
+  strong; the existing equality check prevents pointless self-retries.
+- **Embeddings auto-detect**: `RAG_EMBEDDING_PROVIDER=auto` (default) picks
+  Google if available, else OpenAI. Google is preferred because (1) it's
+  cheaper and (2) it shares no quota with OpenAI's chat completion API —
+  important since OpenAI free-tier embedding quotas are easy to exhaust.
+- **`ragConfig.embeddingProvider` can be `null`** when neither embedding
+  key is set. Retrieval handles this gracefully (returns the empty sentinel,
+  logs a one-time info notice). RAG is effectively off in this state, app
+  runs identically to pre-Phase-6.
+- **Embedding dim is provider-dependent** (OpenAI 1536, Google 768) and
+  defaults are auto-set. `RAG_EMBEDDING_DIM` is still overridable for
+  power users / dim-reducing models. The pgvector column dim must match
+  RAG_EMBEDDING_DIM — switching providers requires a column drop + recreate
+  + re-ingest, same as any embedding-model change.

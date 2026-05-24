@@ -63,30 +63,22 @@ const EMPTY_RESULT: RetrievalResult = Object.freeze({
   groundingViable: false,
 })
 
-// One-shot provider-key check. Caches the result so we log once at first call
-// and then short-circuit silently — without this, every generateNode and
-// answerQuestion call would spew a "retrieval-failed: OPENAI_API_KEY not set"
-// warning on a developer without RAG configured.
-let providerConfiguredCache: boolean | null = null
+// One-shot startup notice when no embedding provider is configured. Without
+// this, the no-provider state is silent — fine for an Anthropic-only deploy
+// that genuinely doesn't want RAG, but easy to miss when a publisher expects
+// RAG to be on. Logged exactly once per process.
+let startupNoticeFired = false
 
-function isProviderConfigured(): boolean {
-  if (providerConfiguredCache !== null) return providerConfiguredCache
-  const envVar =
-    ragConfig.embeddingProvider === 'openai' ? 'OPENAI_API_KEY' : 'GOOGLE_AI_API_KEY'
-  const set = Boolean(process.env[envVar])
-  if (!set) {
-    console.warn(
-      JSON.stringify({
-        ts: new Date().toISOString(),
-        event: 'rag-disabled-missing-key',
-        provider: ragConfig.embeddingProvider,
-        envVar,
-        hint: 'Set the env var or RAG_ENABLED=false to silence this.',
-      }),
-    )
-  }
-  providerConfiguredCache = set
-  return set
+function noticeMissingProvider(): void {
+  if (startupNoticeFired) return
+  startupNoticeFired = true
+  console.info(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      event: 'rag-disabled-no-embedding-provider',
+      hint: 'RAG is in pass-through mode. Set OPENAI_API_KEY or GOOGLE_AI_API_KEY to enable grounding, or RAG_ENABLED=false to silence.',
+    }),
+  )
 }
 
 // Shape of a single row from the raw cosine query. Prisma $queryRaw returns
@@ -112,7 +104,10 @@ function buildQueryText(topic: string, ancestorPath?: string): string {
 
 export async function retrieve(query: RetrievalQuery): Promise<RetrievalResult> {
   if (!ragConfig.enabled) return EMPTY_RESULT
-  if (!isProviderConfigured()) return EMPTY_RESULT
+  if (!ragConfig.embeddingProvider) {
+    noticeMissingProvider()
+    return EMPTY_RESULT
+  }
 
   const topK = query.topK ?? ragConfig.topK
   const threshold = query.scoreThreshold ?? ragConfig.scoreThreshold

@@ -13,11 +13,16 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Embedding column on Chunk. Dimension 1536 matches OpenAI text-embedding-3-small
--- (current default in lib/ragConfig.ts). If you switch to a model with a
--- different dimension (e.g. Gemini text-embedding-004 = 768), drop and recreate
--- this column AND the index below, then re-ingest. The chunker is the same;
--- only the embeddings change.
+-- Embedding column on Chunk. Dimension MUST match RAG_EMBEDDING_DIM
+-- (lib/ragConfig.ts). Defaults by provider:
+--   * OpenAI  text-embedding-3-small   → 1536  ← the value below
+--   * Google  gemini-embedding-001     → 3072  (drop column, change to vector(3072), re-ingest)
+-- Switching providers/dims requires:
+--   ALTER TABLE "Chunk" DROP COLUMN embedding;
+--   ALTER TABLE "Chunk" ADD COLUMN embedding vector(<new_dim>);
+--   DROP INDEX chunk_embedding_hnsw;
+--   CREATE INDEX chunk_embedding_hnsw ON "Chunk" USING hnsw (embedding vector_cosine_ops);
+-- ...then re-run ingestion.
 ALTER TABLE "Chunk" ADD COLUMN IF NOT EXISTS embedding vector(1536);
 
 -- HNSW index with cosine ops — strong recall-at-k for the corpus sizes we'll

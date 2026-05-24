@@ -21,10 +21,6 @@ const REQUEST_TIMEOUT_MS = 60_000
 const RETRY_BACKOFF_BASE_MS = 200
 const RETRY_BACKOFF_JITTER_MS = 200
 
-// Used as the explicit confidence-retry target. Separate from withRetry's
-// promote() chain — that's for transient errors, this is for quality fallback.
-const SONNET_FALLBACK: ModelChoice = { provider: 'anthropic', model: 'claude-sonnet-4-6' }
-
 // Per-provider env-var assertions are now made lazily inside each provider's
 // `callJson`. Asserting them at module load forced the entire app to depend
 // on every provider's key even though `pickModel` may never route to them.
@@ -252,28 +248,28 @@ export async function generateNode(title: string, ancestorPath: string): Promise
   })
 
   // Confidence retry: if the model self-flagged low confidence on a grounded
-  // call and we're not already on Sonnet, retry once on ungrounded Sonnet.
-  // Independent of withRetry (which is for transient errors).
+  // call and we're not already on a strong-tier model, retry once on the
+  // strongest available model with an ungrounded prompt. Independent of
+  // withRetry (which is for transient errors).
   let finalParsed = value.parsed
   let finalChoice = choice
   let finalRawLen = value.raw.length
   let confidenceRetried = false
-  if (
-    grounded &&
-    ragConfig.confidenceRetry &&
-    isLowConfidence(value.parsed) &&
-    choice.model !== SONNET_FALLBACK.model
-  ) {
-    const fallbackPrompt = buildGeneratePrompt(title, ancestorPath, [])
-    const raw = await callProvider(SONNET_FALLBACK, {
-      messages: [{ role: 'user', content: fallbackPrompt }],
-      maxTokens: MAX_TOKENS_GENERATE,
-      timeoutMs: REQUEST_TIMEOUT_MS,
-    })
-    finalParsed = parseJson<GenerateParsed>(raw)
-    finalChoice = SONNET_FALLBACK
-    finalRawLen = raw.length
-    confidenceRetried = true
+  if (grounded && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
+    const strong = promote(choice)
+    const alreadyStrong = strong.model === choice.model && strong.provider === choice.provider
+    if (!alreadyStrong) {
+      const fallbackPrompt = buildGeneratePrompt(title, ancestorPath, [])
+      const raw = await callProvider(strong, {
+        messages: [{ role: 'user', content: fallbackPrompt }],
+        maxTokens: MAX_TOKENS_GENERATE,
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      })
+      finalParsed = parseJson<GenerateParsed>(raw)
+      finalChoice = strong
+      finalRawLen = raw.length
+      confidenceRetried = true
+    }
   }
 
   const latencyMs = Date.now() - start
@@ -386,23 +382,22 @@ export async function answerQuestion(
   let finalChoice = choice
   let finalRawLen = value.raw.length
   let confidenceRetried = false
-  if (
-    grounded &&
-    ragConfig.confidenceRetry &&
-    isLowConfidence(value.parsed) &&
-    choice.model !== SONNET_FALLBACK.model
-  ) {
-    const fallbackSystem = buildQASystemPrompt(nodeTitle, nodeDescription, ancestorPath, [])
-    const raw = await callProvider(SONNET_FALLBACK, {
-      system: fallbackSystem,
-      messages,
-      maxTokens: MAX_TOKENS_QA,
-      timeoutMs: REQUEST_TIMEOUT_MS,
-    })
-    finalParsed = parseJson<QAParsed>(raw)
-    finalChoice = SONNET_FALLBACK
-    finalRawLen = raw.length
-    confidenceRetried = true
+  if (grounded && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
+    const strong = promote(choice)
+    const alreadyStrong = strong.model === choice.model && strong.provider === choice.provider
+    if (!alreadyStrong) {
+      const fallbackSystem = buildQASystemPrompt(nodeTitle, nodeDescription, ancestorPath, [])
+      const raw = await callProvider(strong, {
+        system: fallbackSystem,
+        messages,
+        maxTokens: MAX_TOKENS_QA,
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      })
+      finalParsed = parseJson<QAParsed>(raw)
+      finalChoice = strong
+      finalRawLen = raw.length
+      confidenceRetried = true
+    }
   }
 
   const latencyMs = Date.now() - start

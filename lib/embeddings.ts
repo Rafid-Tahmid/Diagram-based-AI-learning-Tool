@@ -88,6 +88,12 @@ async function embedBatch(texts: string[], args: EmbedArgs = {}): Promise<number
   const model = args.model ?? ragConfig.embeddingModel
   const timeoutMs = args.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
+  if (!provider || !model) {
+    throw new Error(
+      'No embedding provider available. Set OPENAI_API_KEY or GOOGLE_AI_API_KEY, or pass {provider, model} explicitly.',
+    )
+  }
+
   const vectors =
     provider === 'openai'
       ? await embedOpenAI(texts, model, timeoutMs)
@@ -97,13 +103,15 @@ async function embedBatch(texts: string[], args: EmbedArgs = {}): Promise<number
   // vector at insert time gives a useless pgvector error; this fails at the
   // boundary with the actual context.
   const expected = ragConfig.embeddingDim
-  for (const v of vectors) {
-    if (v.length !== expected) {
-      throw new Error(
-        `Embedding dim mismatch: provider=${provider} model=${model} returned ${v.length}, ` +
-          `config expects ${expected}. Update RAG_EMBEDDING_DIM and the vector column ` +
-          `(prisma/sql/001_pgvector.sql), then re-ingest.`,
-      )
+  if (expected !== null) {
+    for (const v of vectors) {
+      if (v.length !== expected) {
+        throw new Error(
+          `Embedding dim mismatch: provider=${provider} model=${model} returned ${v.length}, ` +
+            `config expects ${expected}. Update RAG_EMBEDDING_DIM and the vector column ` +
+            `(prisma/sql/001_pgvector.sql), then re-ingest.`,
+        )
+      }
     }
   }
   return vectors
