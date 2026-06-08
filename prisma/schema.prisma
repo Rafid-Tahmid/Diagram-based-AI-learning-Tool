@@ -23,6 +23,11 @@ model Node {
   description String?
   hasDiagram  Boolean     @default(false)
   status      String      @default("stub")
+  // Sibling order within a parent. Set from the planner's foundational→advanced
+  // list at creation. Needed because createMany stamps siblings with identical
+  // createdAt and id is a random uuid — without this the learning-path order is
+  // lost on the DB round-trip.
+  ordinal     Int         @default(0)
   createdAt   DateTime    @default(now())
   qaMessages  QAMessage[]
   session     Session     @relation(fields: [sessionId], references: [id])
@@ -65,6 +70,24 @@ model Chunk {
   isCode  Boolean @default(false)
   tokens  Int
   doc     Doc     @relation(fields: [docId], references: [id], onDelete: Cascade)
+  // NOTE: a `vector(3072) embedding` column also exists on this table, added via
+  // prisma/sql/001_pgvector.sql (Prisma 5 has no vector type). It is NOT in this
+  // schema, so `prisma db push` will not recreate it — re-run that SQL after any
+  // push that rebuilds Chunk.
 
   @@index([docId])
+}
+
+// Cached learning-path STRUCTURE keyed by question — lets a repeat topic skip the
+// strong-tier planning call. Separate from the Doc/Chunk grounding corpus on
+// purpose: a curriculum skeleton must never surface as a retrieval chunk in Q&A.
+// `topic` is normalized (lowercased, trimmed, whitespace-collapsed) before lookup.
+model PlanCache {
+  id        String   @id @default(uuid())
+  topic     String
+  domain    String
+  plan      Json // { needsDiagram: boolean, children: string[] } — titles only
+  createdAt DateTime @default(now())
+
+  @@unique([topic, domain])
 }

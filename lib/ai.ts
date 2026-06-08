@@ -14,8 +14,12 @@ import { retrieveOrIngest, type RetrievedChunk } from '@/lib/retrieval'
 import { parseJson } from '@/lib/jsonUtils'
 import { ragConfig } from '@/lib/ragConfig'
 import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
+import { getCachedPlan, setCachedPlan } from '@/lib/planCache'
 
-const MAX_TOKENS_GENERATE = 1024
+// A node is built from two independent calls: a grounded DESCRIBE (content) and
+// an ungrounded PLAN (structure). Each is smaller than the old combined call.
+const MAX_TOKENS_DESCRIBE = 768
+const MAX_TOKENS_PLAN = 512
 const MAX_TOKENS_QA = 2048
 const REQUEST_TIMEOUT_MS = 60_000
 // Tiny backoff before retry so we don't immediately re-hit a rate limit.
@@ -143,6 +147,8 @@ function isLowConfidence(parsed: { confidence?: unknown }): boolean {
 
 function logRoute(opts: {
   taskType: RouteInput['taskType']
+  // Which call: grounded content, ungrounded structure, or a Q&A answer.
+  phase: 'describe' | 'plan' | 'qa'
   choice: ModelChoice
   depth: number
   historyLen: number
@@ -159,6 +165,7 @@ function logRoute(opts: {
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
     taskType: opts.taskType,
+    phase: opts.phase,
     provider: opts.choice.provider,
     model: opts.choice.model,
     depth: opts.depth,
@@ -177,12 +184,19 @@ function logRoute(opts: {
 
 // ─── public API ──────────────────────────────────────────────────────────────
 
-type GenerateParsed = Partial<GenerateResponse> & {
-  confidence?: unknown
-  sourcesCited?: unknown
-}
+// A node is generated in two independent halves:
+//   describeNode — grounded CONTENT (RAG + cheap model), the node's description
+//   planChildren — ungrounded STRUCTURE (strong model), the learning-path titles
+// generateNode runs them in parallel and merges. Structure is reasoning, not
+// recall, so it is deliberately ungrounded and pinned to the strong tier (the
+// router gives strong when no retrievalScore is passed).
 
-function buildGeneratePrompt(title: string, ancestorPath: string, chunks: RetrievedChunk[]): string {
+// ── content half: grounded description ───────────────────────────────────────
+
+type DescribeParsed = { description?: unknown; confidence?: unknown; sourcesCited?: unknown }
+type DescribeResult = { description: string; sources: Source[]; confidence?: Confidence }
+
+function buildDescribePrompt(title: string, ancestorPath: string, chunks: RetrievedChunk[]): string {
   const grounded = chunks.length > 0
   const sourcesBlock = grounded ? formatSourcesBlock(chunks) : ''
   const groundedFields = grounded
@@ -190,10 +204,8 @@ function buildGeneratePrompt(title: string, ancestorPath: string, chunks: Retrie
     : ''
   const groundedInstruction = grounded ? `\n\n${GROUNDED_INSTRUCTION}` : ''
 
-  return `You are a learning assistant. Return a JSON object for the given topic in context:
-- "description": 2-3 sentences explaining the concept
-- "needsDiagram": true if this concept has 3-6 distinct subtopics worth exploring visually, false if self-contained
-- "children": if needsDiagram is true, an array of 3-6 subtopic title strings (short titles only, no descriptions). Otherwise an empty array.${groundedFields}
+  return `You are a learning assistant. Return a JSON object describing the given topic in context:
+- "description": 2-3 sentences explaining the concept clearly${groundedFields}
 
 Return ONLY valid JSON, no markdown.${groundedInstruction}${sourcesBlock}
 
@@ -201,12 +213,13 @@ Context: ${ancestorPath}
 Topic: ${title}`
 }
 
-export async function generateNode(title: string, ancestorPath: string, domain: DomainId = DEFAULT_DOMAIN): Promise<GenerateResponse> {
-  // taskType is inferred from ancestorPath: empty string means this is a
-  // root call (a brand-new session), anything else is an expansion.
-  // /api/generate must pass `''` for root — see route comment there.
-  const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
-  const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
+async function describeNode(
+  title: string,
+  ancestorPath: string,
+  domain: DomainId,
+  taskType: RouteInput['taskType'],
+  depth: number,
+): Promise<DescribeResult> {
   const domainSources = DOMAINS[isDomainId(domain) ? domain : DEFAULT_DOMAIN].sources
 
   const retrieval = ragConfig.enabled
@@ -215,22 +228,21 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
 
   const routeInput: RouteInput = { taskType, depth, historyLen: 0, retrievalScore: retrieval.topScore }
   const initial = pickModel(routeInput)
-  const prompt = buildGeneratePrompt(title, ancestorPath, retrieval.groundingViable ? retrieval.chunks : [])
+  const prompt = buildDescribePrompt(title, ancestorPath, retrieval.groundingViable ? retrieval.chunks : [])
 
   const start = Date.now()
   const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
     const raw = await callProvider(c, {
       messages: [{ role: 'user', content: prompt }],
-      maxTokens: MAX_TOKENS_GENERATE,
+      maxTokens: MAX_TOKENS_DESCRIBE,
       timeoutMs: REQUEST_TIMEOUT_MS,
     })
-    return { parsed: parseJson<GenerateParsed>(raw), raw }
+    return { parsed: parseJson<DescribeParsed>(raw), raw }
   })
 
-  // Confidence retry: if the model self-flagged low confidence on a grounded
-  // call and we're not already on a strong-tier model, retry once on the
-  // strongest available model with an ungrounded prompt. Independent of
-  // withRetry (which is for transient errors).
+  // Confidence retry: low-confidence grounded answer → one retry on the strong
+  // tier with an ungrounded prompt. Best-effort — a failed retry keeps the
+  // original answer (never blocks the user).
   let finalParsed = value.parsed
   let finalChoice = choice
   let finalRawLen = value.raw.length
@@ -239,20 +251,30 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
     const strong = promote(choice)
     const alreadyStrong = strong.model === choice.model && strong.provider === choice.provider
     if (!alreadyStrong) {
-      const fallbackPrompt = buildGeneratePrompt(title, ancestorPath, [])
-      const raw = await callProvider(strong, {
-        messages: [{ role: 'user', content: fallbackPrompt }],
-        maxTokens: MAX_TOKENS_GENERATE,
-        timeoutMs: REQUEST_TIMEOUT_MS,
-      })
-      finalParsed = parseJson<GenerateParsed>(raw)
-      finalChoice = strong
-      finalRawLen = raw.length
-      confidenceRetried = true
+      try {
+        const fallbackPrompt = buildDescribePrompt(title, ancestorPath, [])
+        const raw = await callProvider(strong, {
+          messages: [{ role: 'user', content: fallbackPrompt }],
+          maxTokens: MAX_TOKENS_DESCRIBE,
+          timeoutMs: REQUEST_TIMEOUT_MS,
+        })
+        finalParsed = parseJson<DescribeParsed>(raw)
+        finalChoice = strong
+        finalRawLen = raw.length
+        confidenceRetried = true
+      } catch (retryErr) {
+        console.warn(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: 'confidence-retry-failed',
+          taskType,
+          provider: strong.provider,
+          model: strong.model,
+          error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+        }))
+      }
     }
   }
 
-  const latencyMs = Date.now() - start
   const confidence =
     finalParsed.confidence === 'high' || finalParsed.confidence === 'low'
       ? finalParsed.confidence
@@ -260,10 +282,11 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
 
   logRoute({
     taskType,
+    phase: 'describe',
     choice: finalChoice,
     depth,
     historyLen: 0,
-    latencyMs,
+    latencyMs: Date.now() - start,
     inputChars: prompt.length,
     outputChars: finalRawLen,
     retried,
@@ -275,13 +298,114 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
   })
 
   return {
-    description: finalParsed.description ?? '',
-    needsDiagram: finalParsed.needsDiagram ?? false,
-    children: Array.isArray(finalParsed.children)
-      ? (finalParsed.children as string[]).filter(c => typeof c === 'string')
-      : [],
+    description: typeof finalParsed.description === 'string' ? finalParsed.description : '',
     sources: mapSourcesCited(finalParsed.sourcesCited, retrieval.chunks),
     confidence,
+  }
+}
+
+// ── structure half: ungrounded curriculum plan ──────────────────────────────
+
+type PlanParsed = { needsDiagram?: unknown; children?: unknown }
+type PlanResult = { needsDiagram: boolean; children: string[] }
+
+function buildPlanPrompt(title: string, ancestorPath: string): string {
+  return `You are a curriculum designer building a LEARNING PATH, not a glossary.
+Decompose the topic into the subtopics a learner should study, in order.
+
+Return ONLY valid JSON, no markdown:
+- "needsDiagram": true if the topic has 3-6 distinct sub-concepts worth learning as a structured path; false if it is atomic or self-contained.
+- "children": if needsDiagram is true, an array of 3-6 subtopic TITLES ONLY (no descriptions), ordered foundational → advanced — a learner studies them left to right, and earlier items are prerequisites for later ones. Otherwise an empty array.
+
+Rules:
+- Titles are short (≤ 5 words), each a distinct non-overlapping sub-concept.
+- Together they should cover the topic; order strictly by prerequisite / difficulty.
+
+Context: ${ancestorPath}
+Topic: ${title}`
+}
+
+async function planChildren(
+  title: string,
+  ancestorPath: string,
+  taskType: RouteInput['taskType'],
+  depth: number,
+): Promise<PlanResult> {
+  // No retrieval on purpose: curriculum structure is reasoning, not recall.
+  // Omitting retrievalScore makes the router select the strong tier (Sonnet).
+  const initial = pickModel({ taskType, depth, historyLen: 0 })
+  const prompt = buildPlanPrompt(title, ancestorPath)
+
+  const start = Date.now()
+  const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
+    const raw = await callProvider(c, {
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: MAX_TOKENS_PLAN,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    })
+    return { parsed: parseJson<PlanParsed>(raw), raw }
+  })
+
+  logRoute({
+    taskType,
+    phase: 'plan',
+    choice,
+    depth,
+    historyLen: 0,
+    latencyMs: Date.now() - start,
+    inputChars: prompt.length,
+    outputChars: value.raw.length,
+    retried,
+    grounded: false,
+    retrievalTopScore: 0,
+    retrievedChunkCount: 0,
+    confidenceRetried: false,
+    confidence: undefined,
+  })
+
+  const children = Array.isArray(value.parsed.children)
+    ? (value.parsed.children as unknown[]).filter((c): c is string => typeof c === 'string')
+    : []
+  const needsDiagram = value.parsed.needsDiagram === true && children.length > 0
+  return { needsDiagram, children: needsDiagram ? children : [] }
+}
+
+// ── orchestration ───────────────────────────────────────────────────────────
+
+export async function generateNode(title: string, ancestorPath: string, domain: DomainId = DEFAULT_DOMAIN): Promise<GenerateResponse> {
+  // taskType inferred from ancestorPath: '' = root (new session), else expand.
+  // /api/generate must pass '' for root — see route comment there.
+  const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
+  const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
+  const isRoot = !ancestorPath
+  const domainKey = isDomainId(domain) ? domain : DEFAULT_DOMAIN
+
+  // Content (grounded, cheap) and structure (ungrounded, strong) are
+  // independent — run in parallel. For root topics the structure is plan-cached,
+  // so a repeat question skips the strong planning call entirely.
+  const describePromise = describeNode(title, ancestorPath, domain, taskType, depth)
+  const planPromise: Promise<PlanResult> = (async () => {
+    if (isRoot) {
+      const cached = await getCachedPlan(title, domainKey)
+      if (cached) return cached
+    }
+    const fresh = await planChildren(title, ancestorPath, taskType, depth)
+    // Only cache a non-empty plan. An atomic topic legitimately returns no
+    // children, but so does a transient bad plan — caching empty would freeze
+    // that topic as childless forever (no eviction). Re-planning the rare
+    // genuinely-atomic topic is cheap.
+    if (isRoot && fresh.children.length > 0) await setCachedPlan(title, domainKey, fresh)
+    return fresh
+  })()
+
+  const [described, plan] = await Promise.all([describePromise, planPromise])
+
+  return {
+    description: described.description,
+    needsDiagram: plan.needsDiagram,
+    children: plan.children,
+    sources: described.sources,
+    confidence: described.confidence,
   }
 }
 
@@ -367,17 +491,30 @@ export async function answerQuestion(
     const strong = promote(choice)
     const alreadyStrong = strong.model === choice.model && strong.provider === choice.provider
     if (!alreadyStrong) {
-      const fallbackSystem = buildQASystemPrompt(nodeTitle, nodeDescription, ancestorPath, [])
-      const raw = await callProvider(strong, {
-        system: fallbackSystem,
-        messages,
-        maxTokens: MAX_TOKENS_QA,
-        timeoutMs: REQUEST_TIMEOUT_MS,
-      })
-      finalParsed = parseJson<QAParsed>(raw)
-      finalChoice = strong
-      finalRawLen = raw.length
-      confidenceRetried = true
+      // Best-effort quality upgrade — see generateNode. A failed retry must not
+      // discard the valid first answer.
+      try {
+        const fallbackSystem = buildQASystemPrompt(nodeTitle, nodeDescription, ancestorPath, [])
+        const raw = await callProvider(strong, {
+          system: fallbackSystem,
+          messages,
+          maxTokens: MAX_TOKENS_QA,
+          timeoutMs: REQUEST_TIMEOUT_MS,
+        })
+        finalParsed = parseJson<QAParsed>(raw)
+        finalChoice = strong
+        finalRawLen = raw.length
+        confidenceRetried = true
+      } catch (retryErr) {
+        console.warn(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: 'confidence-retry-failed',
+          taskType: 'qa',
+          provider: strong.provider,
+          model: strong.model,
+          error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+        }))
+      }
     }
   }
 
@@ -389,6 +526,7 @@ export async function answerQuestion(
 
   logRoute({
     taskType: 'qa',
+    phase: 'qa',
     choice: finalChoice,
     depth,
     historyLen: history.length,

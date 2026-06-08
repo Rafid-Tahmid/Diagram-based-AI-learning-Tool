@@ -1,6 +1,8 @@
 # Diagram Learning Tool
 
-Type any topic and explore it as an interactive diagram. Click a node to generate its explanation and sub-topics on demand. A per-node chat lets you ask follow-up questions grounded in Wikipedia sources.
+Type any topic and explore it as an interactive diagram. A topic expands into an ordered learning path — sub-topics laid out foundational→advanced — and clicking a node generates its explanation on demand. A per-node chat lets you ask follow-up questions grounded in open sources — Wikipedia, Wikibooks, arXiv, PubMed, Stack Exchange, and MDN — chosen per domain.
+
+Two-model split under the hood: a strong model plans the learning-path *structure* (reasoning), a cheap RAG-grounded model writes each node's *description* (recall). Structures are cached per topic for instant reuse.
 
 Content is generated lazily — nothing is fetched until you click. Supports light and dark mode with preference saved across reloads.
 
@@ -9,7 +11,7 @@ Content is generated lazily — nothing is fetched until you click. Supports lig
 - **Framework:** Next.js 16 (App Router) + React 19 + TypeScript
 - **Diagrams:** `@xyflow/react` (React Flow)
 - **AI:** Anthropic Claude (primary), optional multi-model routing
-- **RAG:** pgvector + Wikipedia JIT ingestion, Google or OpenAI embeddings
+- **RAG:** pgvector + multi-source JIT ingestion (Wikipedia, Wikibooks, arXiv, PubMed, Stack Exchange, MDN), Google or OpenAI embeddings
 - **Database:** Neon (PostgreSQL 17 + pgvector) via Prisma 5
 - **Styling:** Tailwind CSS v4
 
@@ -61,6 +63,12 @@ CREATE EXTENSION IF NOT EXISTS vector;
 ALTER TABLE "Chunk" ADD COLUMN IF NOT EXISTS embedding vector(3072);
 ```
 
+   And the PlanCache table (kept out of `prisma db push` because a push would drop the out-of-schema `embedding` column):
+
+```bash
+npx prisma db execute --file prisma/sql/002_plancache.sql --schema prisma/schema.prisma
+```
+
 6. Start the dev server:
 
 ```bash
@@ -88,17 +96,21 @@ The app works with only `ANTHROPIC_API_KEY` — RAG degrades gracefully to ungro
   Breadcrumb.tsx          ancestor path navigation
   SidebarTree.tsx         collapsible left panel showing the full explored hierarchy
 /lib
-  ai.ts                   generateNode() + answerQuestion() — RAG-aware
+  ai.ts                   generateNode() [plan structure + describe content] + answerQuestion()
   router.ts               multi-model routing (Anthropic / OpenAI / Google)
-  retrieval.ts            pgvector similarity search + JIT Wikipedia ingest
-  ingest.ts               fetch → chunk → embed → upsert pipeline
+  retrieval.ts            pgvector similarity search + JIT multi-source ingest
+  ingest.ts               fetch-all-sources → chunk → embed → upsert pipeline
+  domains.ts              domain → source-list map (drives which sources to fetch)
+  planCache.ts            cache learning-path structure by (topic, domain)
+  /sources               per-source fetchers (mediawiki, arxiv, pubmed, stackexchange, mdn)
   treeUtils.ts            pure tree helpers (buildPath, collapse set ops)
   jsonUtils.ts            safe JSON parse utilities
   db.ts                   Prisma singleton client
   types.ts                shared TypeScript types
 /prisma
-  schema.prisma           Session, Node, QAMessage, Doc, Chunk models
+  schema.prisma           Session, Node, QAMessage, Doc, Chunk, PlanCache models
   sql/001_pgvector.sql    pgvector extension + vector(3072) column on Chunk
+  sql/002_plancache.sql   PlanCache table (raw SQL — db push would drop embedding)
 ```
 
 ## Scripts

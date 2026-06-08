@@ -146,7 +146,7 @@ Detailed notes on what was built in each phase, including hardening passes and b
 
 **Remaining:**
 - Eval harness (`scripts/eval/`) measuring grounded vs ungrounded accuracy
-- MDN fetcher (`lib/sources/mdn.ts`) — currently a stub that falls back to Wikipedia
+- (MDN fetcher and additional sources delivered in Phase 11)
 
 ---
 
@@ -162,3 +162,55 @@ Detailed notes on what was built in each phase, including hardening passes and b
 **UX fixes (same commit):**
 - Removed `+` badge from stub nodes — dashed border is sufficient hint
 - Clicking the whole node body now toggles collapse/expand for generated nodes with children (previously only the small chevron button worked)
+
+---
+
+## Phase 11 — Multi-Source Ingestion ✅
+**Goal:** Replace Wikipedia-only JIT ingest with a multi-source pipeline. Each domain maps to a curated list of open sources; on a cache miss, ingest fetches all of them, merges every result into the corpus, and grounds across the union.
+
+**Prerequisite bug fix (RAG was silently dead):**
+- `lib/ingest.ts` save transaction issued one `$executeRaw UPDATE` per chunk; a long article exceeded Prisma's default 5000 ms interactive-transaction cap, the txn aborted with `Transaction already closed`, and the `Doc` was dropped. Corpus only ever held tiny stub articles → `groundingViable` was effectively always `false`. Fixed: single batched `UPDATE … FROM (unnest(ids[], literals[]))` + `$transaction({ timeout: 30_000, maxWait: 10_000 })`. Verified live: `Photosynthesis` now ingests and grounds (`topScore 0.6656`).
+
+**Built:**
+- `lib/sources/mediawiki.ts` — `makeMediaWikiFetcher(host, label)` factory; `wikipedia.ts` refactored onto it. Yields `wikipedia`, `simplewiki`, `wikibooks`, `wikiversity`
+- `lib/sources/arxiv.ts` — arXiv Atom API, top hit title + abstract
+- `lib/sources/pubmed.ts` — NCBI E-utilities esearch → efetch, abstract XML
+- `lib/sources/stackexchange.ts` — search/advanced API, top Q+A, HTML stripped
+- `lib/sources/mdn.ts` — MDN search API → `{slug}/index.json` → HTML body stripped
+- `lib/ingest.ts` — `ingestTopic` rewritten first-win → fetch-all-merge (`Promise.allSettled`, per-doc save, partial-failure tolerant); `FETCHERS` registers all source keys
+- `lib/domains.ts` — domain source lists updated (see table below)
+
+**Domain → sources:**
+| Domain | Sources |
+|--------|---------|
+| general | wikipedia, simplewiki |
+| technology | wikipedia, arxiv, wikibooks |
+| programming | wikipedia, mdn, wikibooks, stackexchange |
+| medical | wikipedia, pubmed |
+| science | wikipedia, arxiv, wikiversity |
+| history | wikipedia, wikibooks |
+
+**Decisions:** static domain→source routing (no LLM, no added latency); fetch-all-and-merge (not first-win); uniform `FetchedDoc` fetcher contract.
+
+---
+
+## Phase 12 — Learning-Path Planner ✅
+**Goal:** Turn the random subtopic tree into a deliberate learning path. Split node generation into curriculum *structure* (strong model, ungrounded, ordered) and grounded *content* (RAG, cheap model). Cache the structure per topic.
+
+**Built:**
+- `lib/ai.ts` — `generateNode` rewritten as orchestrator over two parallel halves:
+  - `describeNode` — RAG-grounded description, score-routed (the old grounded path, minus children)
+  - `planChildren` — ungrounded curriculum prompt, strong tier (no `retrievalScore` → router picks Sonnet); returns 3-6 ordered titles, foundational→advanced
+  - public `GenerateResponse` shape unchanged → API routes + client untouched
+- `lib/planCache.ts` + `PlanCache` table — cache root-topic structure by normalized `(topic, domain)`; root path checks cache → skips planning call on repeat; separate store from Doc/Chunk
+- `prisma/sql/002_plancache.sql` — table created via raw SQL (push would drop the pgvector `embedding` column)
+- `Node.ordinal` (+ `prisma/sql/003_node_ordinal.sql`) — sibling-order column. Without it the planned order was scrambled on the DB round-trip: `createMany` gives siblings equal `createdAt` and `id` is a random uuid, so `orderBy [createdAt, id]` sorted by random uuid. Now set `ordinal: index` on create and `orderBy [createdAt, ordinal, id]` in all three node reads (generate / expand / session-restore). Verified: planned 6-node order round-trips through Neon intact (3/3)
+- `logRoute` gains a `phase` field (`describe` | `plan` | `qa`)
+
+**Tests:** ai.test.ts rewritten (provider mock routed by prompt — describe vs plan; cache hit/miss/skip); new planCache.test.ts (normalize, validation, error-swallow). 130 tests pass.
+
+**Live check:** `generateNode("Database", root, programming)` → plan = Sonnet, ordered 6-node path (Data Models → SQL → Normalization → Indexing → Transactions → Scaling); describe = grounded, cited, confidence high. Second call: no `phase:plan` log line (cache hit), identical children.
+
+**Decisions:** structure = reasoning (no RAG, strong tier) / content = recall (RAG, cheap); tree + sibling ordering, not a prerequisite DAG (deferred); normalized exact-match plan cache (semantic deferred). See decisions.md → "Learning-Path Planning".
+
+**Deferred:** prerequisite DAG (shared parents); semantic plan-cache matching; per-node (non-root) plan caching.

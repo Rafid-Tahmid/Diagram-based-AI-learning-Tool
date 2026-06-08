@@ -19,10 +19,10 @@ export async function GET(request: Request) {
     const [nodes, session] = await Promise.all([
       prisma.node.findMany({
         where: { sessionId },
-        // Stub siblings are written in a single createMany and end up with
-        // identical createdAt to ms precision. Adding id as a tiebreaker keeps
-        // the canvas layout stable across refreshes.
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        // Siblings share createdAt to ms precision (one createMany), so ordinal
+        // carries the planner's foundational→advanced order across refreshes;
+        // id is a final stable tiebreaker.
+        orderBy: [{ createdAt: 'asc' }, { ordinal: 'asc' }, { id: 'asc' }],
       }),
       prisma.session.findUnique({
         where: { id: sessionId },
@@ -94,20 +94,21 @@ export async function POST(request: Request) {
 
       if (data.needsDiagram && data.children.length > 0) {
         await tx.node.createMany({
-          data: data.children.map(title => ({
+          data: data.children.map((title, index) => ({
             sessionId: target.sessionId,
             parentId: nodeId,
             title,
             description: null,
             hasDiagram: false,
             status: 'stub',
+            ordinal: index,
           })),
         })
       }
 
       const children = await tx.node.findMany({
         where: { sessionId: target.sessionId, parentId: nodeId },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ createdAt: 'asc' }, { ordinal: 'asc' }, { id: 'asc' }],
       })
 
       return { node: updatedNode, children }

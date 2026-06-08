@@ -6,6 +6,8 @@ const mockGeminiCall = vi.fn()
 const mockPickModel = vi.fn()
 const mockPromote = vi.fn()
 const mockRetrieveOrIngest = vi.fn()
+const mockGetCachedPlan = vi.fn()
+const mockSetCachedPlan = vi.fn()
 
 vi.mock('@/lib/providers/anthropic', () => ({
   callJson: (...args: unknown[]) => mockAnthropicCall(...args),
@@ -27,6 +29,12 @@ vi.mock('@/lib/router', () => ({
 
 vi.mock('@/lib/retrieval', () => ({
   retrieveOrIngest: (...args: unknown[]) => mockRetrieveOrIngest(...args),
+}))
+
+// Plan cache mocked so generateNode's root path never touches the DB.
+vi.mock('@/lib/planCache', () => ({
+  getCachedPlan: (...args: unknown[]) => mockGetCachedPlan(...args),
+  setCachedPlan: (...args: unknown[]) => mockSetCachedPlan(...args),
 }))
 
 const mockRagConfig = {
@@ -52,6 +60,13 @@ const sampleChunk = {
   isCode: false,
 }
 
+// generateNode fires two provider calls — a grounded DESCRIBE and an ungrounded
+// PLAN. Route the mock by prompt content so each gets the right JSON regardless
+// of which resolves first (they run in parallel).
+function isPlanPrompt(args: { messages: { content: string }[] }): boolean {
+  return args.messages[0].content.includes('curriculum designer')
+}
+
 describe('generateNode', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -59,16 +74,18 @@ describe('generateNode', () => {
     mockRagConfig.confidenceRetry = true
     mockPickModel.mockReturnValue(haiku)
     mockPromote.mockReturnValue(sonnet)
-    mockAnthropicCall.mockResolvedValue(
-      JSON.stringify({
-        description: 'Plants convert light to energy.',
-        needsDiagram: true,
-        children: ['Light reactions', 'Calvin cycle'],
-      }),
+    mockGetCachedPlan.mockResolvedValue(null)
+    mockSetCachedPlan.mockResolvedValue(undefined)
+    mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) =>
+      Promise.resolve(
+        isPlanPrompt(args)
+          ? JSON.stringify({ needsDiagram: true, children: ['Light reactions', 'Calvin cycle'] })
+          : JSON.stringify({ description: 'Plants convert light to energy.' }),
+      ),
     )
   })
 
-  it('generates root node with description and children', async () => {
+  it('generates root node with description (content) and ordered children (structure)', async () => {
     const { generateNode } = await import('./ai')
     const result = await generateNode('Photosynthesis', '', 'science')
     expect(result.description).toBe('Plants convert light to energy.')
@@ -79,21 +96,49 @@ describe('generateNode', () => {
     )
   })
 
-  it('uses expand taskType when ancestor path is present', async () => {
+  it('caches the plan for a root topic', async () => {
+    const { generateNode } = await import('./ai')
+    await generateNode('Photosynthesis', '', 'science')
+    expect(mockGetCachedPlan).toHaveBeenCalledWith('Photosynthesis', 'science')
+    expect(mockSetCachedPlan).toHaveBeenCalledWith(
+      'Photosynthesis',
+      'science',
+      { needsDiagram: true, children: ['Light reactions', 'Calvin cycle'] },
+    )
+  })
+
+  it('uses a cached plan and skips the planning call', async () => {
+    mockGetCachedPlan.mockResolvedValue({ needsDiagram: true, children: ['Cached A', 'Cached B'] })
+    const { generateNode } = await import('./ai')
+    const result = await generateNode('Photosynthesis', '', 'science')
+    expect(result.children).toEqual(['Cached A', 'Cached B'])
+    // Only the DESCRIBE call should hit the provider — no plan call.
+    expect(mockAnthropicCall).toHaveBeenCalledTimes(1)
+    expect(mockSetCachedPlan).not.toHaveBeenCalled()
+  })
+
+  it('uses expand taskType when ancestor path is present (no cache)', async () => {
     const { generateNode } = await import('./ai')
     await generateNode('Light reactions', 'Photosynthesis', 'science')
     expect(mockPickModel).toHaveBeenCalledWith(
       expect.objectContaining({ taskType: 'expand', depth: 1 }),
     )
+    // Plan cache is root-only.
+    expect(mockGetCachedPlan).not.toHaveBeenCalled()
   })
 
   it('parses JSON wrapped in markdown fences', async () => {
-    mockAnthropicCall.mockResolvedValue(
-      '```json\n{"description":"Fenced","needsDiagram":false,"children":[]}\n```',
+    mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) =>
+      Promise.resolve(
+        isPlanPrompt(args)
+          ? '```json\n{"needsDiagram":false,"children":[]}\n```'
+          : '```json\n{"description":"Fenced"}\n```',
+      ),
     )
     const { generateNode } = await import('./ai')
     const result = await generateNode('Topic', '', 'general')
     expect(result.description).toBe('Fenced')
+    expect(result.needsDiagram).toBe(false)
   })
 
   it('maps sources when retrieval is grounded', async () => {
@@ -103,14 +148,12 @@ describe('generateNode', () => {
       topScore: 0.8,
       groundingViable: true,
     })
-    mockAnthropicCall.mockResolvedValue(
-      JSON.stringify({
-        description: 'Grounded answer.',
-        needsDiagram: false,
-        children: [],
-        confidence: 'high',
-        sourcesCited: [1],
-      }),
+    mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) =>
+      Promise.resolve(
+        isPlanPrompt(args)
+          ? JSON.stringify({ needsDiagram: false, children: [] })
+          : JSON.stringify({ description: 'Grounded answer.', confidence: 'high', sourcesCited: [1] }),
+      ),
     )
     const { generateNode } = await import('./ai')
     const result = await generateNode('Photosynthesis', '', 'science')
@@ -119,35 +162,32 @@ describe('generateNode', () => {
     expect(result.confidence).toBe('high')
   })
 
-  it('retries on low confidence with ungrounded prompt', async () => {
+  it('retries the description on low confidence with an ungrounded prompt', async () => {
     mockRagConfig.enabled = true
     mockRetrieveOrIngest.mockResolvedValue({
       chunks: [sampleChunk],
       topScore: 0.8,
       groundingViable: true,
     })
-    mockAnthropicCall
-      .mockResolvedValueOnce(
-        JSON.stringify({
-          description: 'Shaky.',
-          needsDiagram: false,
-          children: [],
-          confidence: 'low',
-        }),
+    let describeCall = 0
+    mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) => {
+      if (isPlanPrompt(args)) {
+        return Promise.resolve(JSON.stringify({ needsDiagram: false, children: [] }))
+      }
+      describeCall++
+      return Promise.resolve(
+        JSON.stringify(
+          describeCall === 1
+            ? { description: 'Shaky.', confidence: 'low' }
+            : { description: 'Retried.', confidence: 'high' },
+        ),
       )
-      .mockResolvedValueOnce(
-        JSON.stringify({
-          description: 'Retried.',
-          needsDiagram: false,
-          children: [],
-          confidence: 'high',
-        }),
-      )
+    })
 
     const { generateNode } = await import('./ai')
     const result = await generateNode('Photosynthesis', '', 'science')
     expect(result.description).toBe('Retried.')
-    expect(mockAnthropicCall).toHaveBeenCalledTimes(2)
+    expect(describeCall).toBe(2)
     expect(mockPromote).toHaveBeenCalled()
   })
 })

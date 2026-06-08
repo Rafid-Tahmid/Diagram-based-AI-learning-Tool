@@ -5,12 +5,14 @@ Read this when modifying `lib/ai.ts`, `lib/router.ts`, `lib/retrieval.ts`, or `l
 ## AI Prompt Shapes
 
 ### Flow 1 — Node generation (`generateNode`)
+Two independent calls run in parallel, then merge into the unchanged
+`GenerateResponse { description, needsDiagram, children, sources?, confidence? }`.
+
+**(a) `describeNode` — CONTENT (RAG-grounded, score-routed model):**
 ```
 System: (none)
-User:   You are a learning assistant. Return JSON for the given topic:
+User:   You are a learning assistant. Return JSON describing the topic:
         - "description": 2-3 sentences
-        - "needsDiagram": true if 3-6 subtopics worth exploring visually
-        - "children": array of 3-6 subtopic title strings (if needsDiagram)
         - "confidence": "high"|"low"  (only when grounded)
         - "sourcesCited": [n, ...]     (only when grounded)
 
@@ -19,6 +21,25 @@ User:   You are a learning assistant. Return JSON for the given topic:
         Context: <ancestorPath>
         Topic: <title>
 ```
+
+**(b) `planChildren` — STRUCTURE (ungrounded, strong tier):**
+```
+System: (none)
+User:   You are a curriculum designer building a LEARNING PATH, not a glossary.
+        - "needsDiagram": true if 3-6 distinct sub-concepts worth a structured path
+        - "children": 3-6 TITLES ONLY, ordered foundational → advanced
+                      (earlier = prerequisite for later)
+        Rules: short titles, distinct, cover the topic, ordered by difficulty.
+
+        Context: <ancestorPath>
+        Topic: <title>
+```
+No retrieval — omitting `retrievalScore` makes the router pick the strong tier.
+Children persist in returned order → canvas L→R = beginner→advanced.
+
+**Plan cache:** for root topics, `planChildren` is skipped when `getCachedPlan(topic, domain)`
+hits (`PlanCache` table, normalized exact-match key). Fresh root plans are stored via
+`setCachedPlan`. The cache is intentionally separate from the Doc/Chunk corpus.
 
 ### Flow 2 — Q&A (`answerQuestion`)
 ```
@@ -102,9 +123,40 @@ retrieveOrIngest(topic, domainSources)
   → retrieve()        — vector similarity search in pgvector
     if groundingViable: return chunks
     else:
-  → ingestTopic()     — fetch Wikipedia → chunk → embed → upsert
+  → ingestTopic()     — fetch ALL domain sources (parallel) → chunk → embed → upsert
   → retrieve()        — re-query with fresh corpus
 ```
+
+### Sources & domain routing
+- `lib/domains.ts` holds a static `domain → sources[]` map. No LLM picks sources — the
+  domain pill is the signal, and weak chunks self-filter at the `0.55` cosine gate.
+- `lib/sources/*` each export a fetcher of shape
+  `(topic) => Promise<FetchedDoc | null>` where `FetchedDoc = { url, title, breadcrumb, content }`.
+  `null` = miss/failure; the ingest loop skips it.
+- `lib/sources/mediawiki.ts` is a host-parameterized factory powering `wikipedia`,
+  `simplewiki`, `wikibooks`, `wikiversity` (identical search+extract, different host).
+- `arxiv` / `pubmed` return abstracts (XML); `stackexchange` / `mdn` strip HTML bodies.
+- `lib/ingest.ts` `FETCHERS` maps each source key → fetcher. Adding a source = write a
+  fetcher, register it, add the key to the relevant domain(s) in `domains.ts`.
+
+| Domain | Sources |
+|--------|---------|
+| general | wikipedia, simplewiki |
+| technology | wikipedia, arxiv, wikibooks |
+| programming | wikipedia, mdn, wikibooks, stackexchange |
+| medical | wikipedia, pubmed |
+| science | wikipedia, arxiv, wikiversity |
+| history | wikipedia, wikibooks |
+
+### Ingest: fetch-all-and-merge
+- All domain sources fetched in parallel (`Promise.allSettled`) — one source failing or
+  timing out never blocks the others.
+- Each successful `FetchedDoc` is chunked, embedded, and saved as its **own** `Doc` row
+  (own `url` + `source`). `Doc.url @unique` dedups; concurrent same-URL ingest → P2002 →
+  read existing chunks.
+- Embeddings written in one batched `UPDATE … unnest(ids[], vectors[])` per doc inside a
+  `$transaction({ timeout: 30_000 })` — the per-chunk UPDATE loop previously blew the
+  default 5 s interactive-transaction cap on long articles and silently dropped the Doc.
 
 ### `retrieve()` returns
 ```ts
@@ -116,7 +168,8 @@ retrieveOrIngest(topic, domainSources)
 ```
 
 ### Failure modes (all fail-soft)
-- Wikipedia returns null → `groundingViable: false`
+- A source fetcher returns null (404/timeout/parse fail) → that source skipped, others continue
+- Every source returns null → empty corpus for the topic → `groundingViable: false`
 - Embedding API error → `groundingViable: false`
 - Concurrent ingest for same URL → P2002 → loser queries existing chunks
 - Retrieval disabled (`RAG_ENABLED=false`) → `groundingViable: false`

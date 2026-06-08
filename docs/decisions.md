@@ -39,6 +39,18 @@ Architectural and design decisions made during development. Read this when you n
 - Q&A AI returns `classifications[]` + `offerDiagram` boolean; user must opt in before the inline diagram renders
 - Q&A inline diagrams are display-only — clicking them does nothing, not lazy-expandable
 
+## Learning-Path Planning (Phase 12)
+- Node generation split into two independent calls: `planChildren` (STRUCTURE) + `describeNode` (CONTENT), run in parallel in `generateNode`. Replaces the old single call that did description + random children together
+- **Structure is ungrounded + strong tier on purpose** — designing a curriculum (what to learn, in what order) is reasoning, not fact-retrieval. `planChildren` passes no `retrievalScore`, so the router selects the strong tier (Sonnet). Grounding it on Wikipedia chunks would slow it without improving ordering
+- **Content stays grounded + cheap** — `describeNode` runs `retrieveOrIngest` and is score-routed (≥0.72 → Haiku). This is the only half that touches RAG. Net: RAG fires on describe + Q&A, not on planning
+- Planning prompt demands ordered, prerequisite-aware titles (foundational→advanced); children are persisted in that order so the canvas reads left→right as a learning path. Sibling ordering, not a prerequisite DAG (deferred: shared-parent DAG is a multi-parent schema + layout rewrite)
+- **`Node.ordinal` column is what makes the order survive persistence** — `createMany` stamps siblings with identical `createdAt` and `id` is a random uuid, so the prior `orderBy [createdAt, id]` shuffled siblings by random uuid. Pre-Phase-12 that was harmless (subtopics were unordered); Phase 12 made order load-bearing, so order is now set as `ordinal: index` at create and read back with `orderBy [createdAt, ordinal, id]` in all three node reads (generate, expand, session-restore). Added via raw SQL (`003_node_ordinal.sql`), not `db push`
+- **PlanCache** caches a root topic's structure (titles + needsDiagram) keyed by normalized `(topic, domain)`. A repeat question skips the strong planning call. Kept a SEPARATE table from Doc/Chunk so a curriculum skeleton can never surface as a grounding chunk in Q&A. Descriptions are NOT cached here (stay lazy + grounded). Matching is normalized exact-match for now (semantic similarity deferred — serving a wrong cached curriculum erodes trust more than a miss)
+- Cache reads/writes are best-effort (try/catch → null/no-op) — a DB hiccup never blocks generation
+- `PlanCache` table created via raw SQL (`prisma/sql/002_plancache.sql`), NOT `prisma db push` — a full push diff insists on dropping the out-of-schema `Chunk.embedding` pgvector column (would wipe the corpus)
+- `generateNode`'s public `GenerateResponse` shape is unchanged, so API routes and the client needed zero changes
+- One `logRoute` per call now carries a `phase` field (`describe` | `plan` | `qa`) to keep the two halves observable
+
 ## Model Routing
 - `pickModel` routes on `taskType + depth + historyLen + retrievalScore`; `promote` upgrades to the strong tier on retry
 - Score-based routing: `retrievalScore >= 0.72` → Haiku (cheap); `< 0.72` → Sonnet (strong). Uniform across all task types. `HAIKU_SAFE_SCORE = 0.72` derived from Gemini cosine similarity benchmarks
@@ -55,15 +67,18 @@ Architectural and design decisions made during development. Read this when you n
 - One structured `console.log` per AI call: ts, taskType, provider, model, depth, historyLen, latencyMs, chars in/out, retried, grounded, confidence
 
 ## RAG & Retrieval
-- JIT ingestion — fetch Wikipedia on cache miss, store, immediately use for grounding; corpus self-populates with usage
+- JIT ingestion — on cache miss, fetch the topic from every source mapped to the active domain, store, immediately use for grounding; corpus self-populates with usage
+- Multi-source routing is a **static `domain → sources[]` map** (`lib/domains.ts`), not LLM-picked — deterministic, zero added latency/cost; the domain pill is already the signal and weak chunks self-filter at the 0.55 cosine gate
+- Ingest is **fetch-all-and-merge**, not first-win — all domain sources fetched in parallel via `Promise.allSettled`; a source that fails/returns null is skipped, the rest still persist. Each source = its own `Doc` row
+- All fetchers share the `FetchedDoc` shape `{ url, title, breadcrumb, content }` and live under `lib/sources/`; `lib/sources/mediawiki.ts` is a host-parameterized factory reused for wikipedia/simplewiki/wikibooks/wikiversity. arXiv/PubMed return abstracts; StackExchange/MDN strip HTML
+- Embeddings written per doc in a single batched `UPDATE … FROM (unnest(ids[], literals[]))` inside `$transaction({ timeout: 30_000, maxWait: 10_000 })`. The earlier per-chunk UPDATE loop made one round-trip per chunk, each carrying a ~tens-of-KB 3072-dim vector literal; a long article blew Prisma's default 5000 ms interactive-transaction cap, the txn aborted, and the Doc was silently dropped — so RAG never grounded on any real-sized topic. Batched write = 1 round-trip; the 30 s timeout is cold-Neon insurance
 - `Doc.url @unique` is the dedup boundary; concurrent ingest for same URL hits P2002 and queries existing chunks
 - `scoreThreshold` defaults to 0.55 — below this, treat as a miss; ungrounded Sonnet beats a small model on weak chunks
 - pgvector index: no HNSW — pgvector caps HNSW at 2000 dims; Gemini returns 3072, so sequential scan is used (fast for < ~50k chunks; add IVFFlat when corpus grows)
 - Embedding dim is 3072 (Google `gemini-embedding-001`), or 1536 (OpenAI `text-embedding-3-small`). Must match pgvector column — switching providers requires column drop + recreate + re-ingest
 - Embeddings auto-detect: `RAG_EMBEDDING_PROVIDER=auto` prefers Google (cheaper, separate quota from LLM calls)
 - `ragConfig.embeddingProvider` can be `null` — retrieval returns `groundingViable: false`, app runs as pre-RAG
-- Domain is saved on the `Session` row and restored from history; `sourceFilter` scopes vector search to domain sources
-- MDN fetcher is a stub — currently calls `fetchWikipedia` as fallback; listed in domain configs so a real implementation activates automatically
+- Domain is saved on the `Session` row and restored from history; `sourceFilter` scopes vector search to domain sources (now a multi-value `source = ANY(...)` array)
 - `QAMessage.sources Json?` mirrors the `diagram Json?` pattern — `undefined` to skip (avoids `Prisma.JsonNull` sentinel)
 
 ## Database & Persistence

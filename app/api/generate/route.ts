@@ -47,22 +47,23 @@ export async function POST(request: Request) {
 
       if (data.needsDiagram && data.children.length > 0) {
         await tx.node.createMany({
-          data: data.children.map(title => ({
+          data: data.children.map((title, index) => ({
             sessionId,
             parentId: root.id,
             title,
             description: null,
             hasDiagram: false,
             status: 'stub',
+            ordinal: index,
           })),
         })
       }
 
       return tx.node.findMany({
         where: { sessionId },
-        // Stub siblings share createdAt to ms precision; id as tiebreaker
-        // keeps layout deterministic across refreshes.
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        // Siblings share createdAt to ms precision, so ordinal carries the
+        // planner's foundational→advanced order; id is a final stable tiebreaker.
+        orderBy: [{ createdAt: 'asc' }, { ordinal: 'asc' }, { id: 'asc' }],
       })
     })
 
