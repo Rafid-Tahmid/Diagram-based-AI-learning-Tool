@@ -15,13 +15,13 @@ function InlineNode({ data }: NodeProps) {
   return (
     <div className={`px-3 py-2 rounded-lg border text-left w-[160px] shadow ${
       isRoot
-        ? 'bg-indigo-700 border-indigo-500 text-white'
-        : 'bg-slate-700 border-slate-600 text-slate-100'
+        ? 'bg-[var(--accent-soft)] border-[var(--accent-border)] text-[var(--fg)]'
+        : 'bg-[var(--surface)] border-[var(--hairline-strong)] text-[var(--fg)]'
     }`}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="text-xs font-semibold leading-snug">{label}</div>
       {description && (
-        <div className="text-xs mt-1 text-slate-300 leading-relaxed font-normal">{description}</div>
+        <div className="text-xs mt-1 text-[var(--fg-muted)] leading-relaxed font-normal">{description}</div>
       )}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
@@ -29,7 +29,7 @@ function InlineNode({ data }: NodeProps) {
 }
 
 const nodeTypes = { inlineNode: InlineNode }
-const edgeStyle = { stroke: '#6366f1', strokeWidth: 1.5 }
+const edgeStyle = { stroke: 'var(--accent-border)', strokeWidth: 1.5 }
 
 type Props = {
   rootLabel: string
@@ -64,7 +64,7 @@ export default function QAInlineDiagram({ rootLabel, classifications }: Props) {
   }))
 
   return (
-    <div className="w-full rounded-lg overflow-hidden border border-slate-700" style={{ height: 260 }}>
+    <div className="w-full rounded-lg overflow-hidden border border-[var(--hairline)]" style={{ height: 260 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -79,7 +79,7 @@ export default function QAInlineDiagram({ rootLabel, classifications }: Props) {
         fitViewOptions={{ padding: 0.15 }}
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#1e293b" gap={20} />
+        <Background color="var(--hairline-strong)" gap={20} />
       </ReactFlow>
     </div>
   )

@@ -4,7 +4,6 @@ const RAG_ENV_KEYS = [
   'RAG_ENABLED',
   'RAG_TOP_K',
   'RAG_SCORE_THRESHOLD',
-  'RAG_TIER',
   'RAG_CONFIDENCE_RETRY',
   'RAG_EMBEDDING_PROVIDER',
   'RAG_EMBEDDING_MODEL',
@@ -37,7 +36,6 @@ describe('ragConfig', () => {
     expect(ragConfig.enabled).toBe(true)
     expect(ragConfig.topK).toBe(4)
     expect(ragConfig.scoreThreshold).toBe(0.55)
-    expect(ragConfig.tier).toBe('baseline')
     expect(ragConfig.confidenceRetry).toBe(true)
     expect(ragConfig.embeddingProvider).toBeNull()
   })

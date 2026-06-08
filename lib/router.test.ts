@@ -134,20 +134,3 @@ describe('isRetriable', () => {
     expect(isRetriable(Object.assign(new Error('unauthorized'), { status: 401 }))).toBe(false)
   })
 })
-
-describe('isProviderAvailable', () => {
-  beforeEach(() => {
-    vi.resetModules()
-    stubAnthropicOnly()
-  })
-
-  afterEach(() => {
-    vi.unstubAllEnvs()
-  })
-
-  it('detects configured providers at module load', async () => {
-    const { isProviderAvailable } = await loadRouter()
-    expect(isProviderAvailable('anthropic')).toBe(true)
-    expect(isProviderAvailable('openai')).toBe(false)
-  })
-})

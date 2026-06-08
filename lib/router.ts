@@ -54,14 +54,6 @@ function detectProviders(): Set<ProviderName> {
 
 const availableProviders = detectProviders()
 
-export function isProviderAvailable(p: ProviderName): boolean {
-  return availableProviders.has(p)
-}
-
-export function listAvailableProviders(): ProviderName[] {
-  return [...availableProviders]
-}
-
 // ─── model catalog ───────────────────────────────────────────────────────────
 //
 // Tiered list of every model the app knows how to call. `costRank` is an
@@ -76,23 +68,19 @@ export function listAvailableProviders(): ProviderName[] {
 type CatalogEntry = ModelChoice & {
   tier: 'cheap' | 'strong'
   costRank: number
-  // True when the model is a good fit for long-context tasks (Q&A with deep
-  // history, deep ancestor paths). The current router only consults this for
-  // the long-context Q&A path, but it's typed so future heuristics can use it.
-  longContext: boolean
 }
 
 const CATALOG: readonly CatalogEntry[] = Object.freeze([
   // strong tier — best-quality models, prefer for root + ungrounded Q&A
-  { provider: 'anthropic', model: 'claude-sonnet-4-6',           tier: 'strong', costRank: 5, longContext: true },
-  { provider: 'openai',    model: 'gpt-4o',                      tier: 'strong', costRank: 4, longContext: true },
-  { provider: 'google',    model: 'gemini-2.5-pro',              tier: 'strong', costRank: 3, longContext: true },
+  { provider: 'anthropic', model: 'claude-sonnet-4-6',           tier: 'strong', costRank: 5 },
+  { provider: 'openai',    model: 'gpt-4o',                      tier: 'strong', costRank: 4 },
+  { provider: 'google',    model: 'gemini-2.5-pro',              tier: 'strong', costRank: 3 },
 
   // cheap tier — used for structural tasks (expand, grounded Q&A under cheap
   // tier, long-history Q&A) where good-enough is enough.
-  { provider: 'anthropic', model: 'claude-haiku-4-5-20251001',   tier: 'cheap',  costRank: 3, longContext: true },
-  { provider: 'openai',    model: 'gpt-4o-mini',                 tier: 'cheap',  costRank: 2, longContext: true },
-  { provider: 'google',    model: 'gemini-2.0-flash',            tier: 'cheap',  costRank: 1, longContext: true },
+  { provider: 'anthropic', model: 'claude-haiku-4-5-20251001',   tier: 'cheap',  costRank: 3 },
+  { provider: 'openai',    model: 'gpt-4o-mini',                 tier: 'cheap',  costRank: 2 },
+  { provider: 'google',    model: 'gemini-2.0-flash',            tier: 'cheap',  costRank: 1 },
 ])
 
 // ─── selection logic ────────────────────────────────────────────────────────

@@ -3,7 +3,6 @@
 // module load — restart to pick up env changes (which is what we want; no
 // hot-reloading config in production).
 
-export type RagTier = 'baseline' | 'cheap'
 export type EmbeddingProvider = 'openai' | 'google'
 
 // Models that Anthropic ships have no first-party embedding endpoint, so the
@@ -44,11 +43,6 @@ export type RagConfig = {
   // the ungrounded path — better than grounding a small model on a weakly
   // relevant chunk (the worst RAG failure mode).
   scoreThreshold: number
-
-  // baseline = grounded calls keep current model tiers (pure accuracy play,
-  // Stage 1 default). cheap = drop Q&A to a cheap-tier model when grounded
-  // (Stage 2; only flip after the Stage 5 eval shows it's safe).
-  tier: RagTier
 
   // When the model self-flags `confidence: "low"`, retry once on a strong-tier
   // model. Toggleable in case it ever causes a retry storm under load.
@@ -147,7 +141,6 @@ function buildConfig(): RagConfig {
     enabled: envBool('RAG_ENABLED', true),
     topK: envInt('RAG_TOP_K', 4, 1, 20),
     scoreThreshold: envFloat('RAG_SCORE_THRESHOLD', 0.55, 0, 1),
-    tier: envEnum<RagTier>('RAG_TIER', 'baseline', ['baseline', 'cheap'] as const),
     confidenceRetry: envBool('RAG_CONFIDENCE_RETRY', true),
     embeddingProvider,
     embeddingModel,

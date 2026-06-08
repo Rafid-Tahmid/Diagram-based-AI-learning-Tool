@@ -11,39 +11,32 @@ export type DomainConfig = {
   // Source identifiers, in priority order. Used as Doc.source values and
   // as sourceFilter in retrieval. First source is fetched on a JIT miss.
   sources: string[]
-  color: string
 }
 
 export const DOMAINS: Record<DomainId, DomainConfig> = {
   general: {
     label: 'General',
-    sources: ['wikipedia'],
-    color: 'slate',
+    sources: ['wikipedia', 'simplewiki'],
   },
   technology: {
     label: 'Technology',
-    sources: ['wikipedia', 'mdn'],
-    color: 'indigo',
+    sources: ['wikipedia', 'arxiv', 'wikibooks'],
   },
   programming: {
     label: 'Programming',
-    sources: ['wikipedia', 'mdn'],
-    color: 'violet',
+    sources: ['wikipedia', 'mdn', 'wikibooks', 'stackexchange'],
   },
   medical: {
     label: 'Medical',
-    sources: ['wikipedia'],
-    color: 'emerald',
+    sources: ['wikipedia', 'pubmed'],
   },
   science: {
     label: 'Science',
-    sources: ['wikipedia'],
-    color: 'sky',
+    sources: ['wikipedia', 'arxiv', 'wikiversity'],
   },
   history: {
     label: 'History',
-    sources: ['wikipedia'],
-    color: 'amber',
+    sources: ['wikipedia', 'wikibooks'],
   },
 }
 

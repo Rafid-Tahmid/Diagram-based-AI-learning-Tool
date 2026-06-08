@@ -75,7 +75,7 @@ export default function SidebarTree({ nodes, selectedNodeId, collapsedNodeIds, o
         )}
         <button
           onClick={() => setOpen(v => !v)}
-          className="w-5.5 h-5.5 w-[22px] h-[22px] flex items-center justify-center rounded text-[var(--fg-faint)] hover:bg-[var(--surface)] hover:text-[var(--fg)] transition-colors"
+          className="w-[22px] h-[22px] flex items-center justify-center rounded text-[var(--fg-faint)] hover:bg-[var(--surface)] hover:text-[var(--fg)] transition-colors"
           aria-label={open ? 'Collapse sidebar' : 'Expand sidebar'}
         >
           <svg
