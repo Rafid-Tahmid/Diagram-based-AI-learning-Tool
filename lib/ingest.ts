@@ -37,6 +37,13 @@ export type IngestResult = {
   sources: string[]
 }
 
+// Cap chunks embedded+stored per source. Embedding every chunk of a long
+// article (a Wikipedia page can be 50-80 chunks) is the dominant cost of a cold
+// ingest. Retrieval only ever returns topK (default 4), and the earliest chunks
+// — the lede and first sections — are the most on-topic for a title query, so
+// the tail buys latency without buying much grounding quality.
+const MAX_CHUNKS_PER_DOC = 12
+
 function toRetrievedChunk(
   c: { id: string; docId: string; content: string; isCode: boolean },
   source: string,
@@ -53,7 +60,7 @@ function toRetrievedChunk(
 // Dedup: Doc.url is @unique. A concurrent request ingesting the same URL throws
 // P2002 — we catch it and read the existing chunks so both callers get context.
 async function saveDoc(topic: string, source: string, doc: FetchedDoc): Promise<RetrievedChunk[]> {
-  const rawChunks = chunkText(doc.content)
+  const rawChunks = chunkText(doc.content).slice(0, MAX_CHUNKS_PER_DOC)
   if (rawChunks.length === 0) return []
 
   let vectors: number[][]

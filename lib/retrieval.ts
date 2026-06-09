@@ -181,6 +181,20 @@ export async function retrieve(query: RetrievalQuery): Promise<RetrievalResult> 
   }
 }
 
+// Max time the user-facing request blocks on a cold ingest. Past this, we
+// answer with whatever already committed and let the ingest finish detached.
+//
+// Tuned for COST first: kept above a typical cold ingest (the per-source chunk
+// cap keeps that ~6-8s) so the common case finishes and grounds → describe
+// routes to cheap Haiku. A lower budget would bail more often to an ungrounded
+// answer, which forces the strong (expensive) tier — the opposite of the goal.
+// Only a genuinely stuck source / cold Neon hits this ceiling.
+const INGEST_BUDGET_MS = 12000
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 // JIT retrieval: try the DB first; if no viable grounding found, ingest the
 // topic on-demand from domain sources and re-query. Degrades gracefully at
 // every failure point so the caller always gets a valid (possibly ungrounded)
@@ -195,9 +209,17 @@ export async function retrieveOrIngest(
   // Without embeddings, ingest would only fetch Wikipedia and fail — skip it.
   if (!ragConfig.enabled || !ragConfig.embeddingProvider) return first
 
-  // Cache miss — ingest the topic from the first working source.
-  await ingestTopic(query.topic, domainSources)
+  // Cache miss — ingest, but cap how long the request blocks on it. If ingest
+  // outruns the budget (big article, slow source, cold Neon), we stop waiting
+  // and re-query whatever already committed; the ingest promise keeps running
+  // detached so the topic warms up for the next visit. Trades guaranteed
+  // first-view grounding for a bounded worst case.
+  // NOTE: relies on the runtime not killing the request's async work after the
+  // response (true for the Node server / self-host; on serverless wrap the
+  // ingest in the platform's `waitUntil`).
+  const ingestDone = ingestTopic(query.topic, domainSources).catch(() => {})
+  await Promise.race([ingestDone, delay(INGEST_BUDGET_MS)])
 
-  // Re-query now that the corpus has content for this topic.
+  // Re-query now that the corpus (partially or fully) has content.
   return retrieve({ ...query, sourceFilter: domainSources })
 }
