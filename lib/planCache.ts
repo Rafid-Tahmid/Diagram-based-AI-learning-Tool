@@ -4,6 +4,13 @@ import { prisma } from '@/lib/db'
 // only — never descriptions or grounding content (those stay lazy + RAG).
 export type CachedPlan = { needsDiagram: boolean; children: string[] }
 
+// Cache key for any node, root or nested. The ancestor path disambiguates
+// titles that mean different things in different contexts ("Trees" under
+// "Data Structures" vs "Forest Ecology").
+export function buildPlanKey(title: string, ancestorPath: string): string {
+  return ancestorPath ? `${ancestorPath} > ${title}` : title
+}
+
 // Normalize so trivially-different phrasings of the same topic collide:
 // "  Database ", "database", "DATABASE" → "database". Deliberately conservative
 // (exact match after normalization) — semantic-similarity matching is a later

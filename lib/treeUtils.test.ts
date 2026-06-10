@@ -3,7 +3,7 @@ import { buildPath, hasCollapsedAncestor, removeFromSet, addToSet } from './tree
 import type { NodeInfo } from './types'
 
 function node(id: string, parentId: string | null, label = id): NodeInfo {
-  return { id, label, parentId, status: 'generated', hasDiagram: false }
+  return { id, label, parentId, status: 'generated', hasDiagram: false, mastery: 'learning' }
 }
 
 describe('buildPath', () => {

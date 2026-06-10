@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { ProviderCallArgs } from '@/lib/router'
+import type { ProviderCallArgs, ProviderResult } from '@/lib/router'
 
 // Lazy singleton — instantiating at module load would crash the whole app
 // at boot if ANTHROPIC_API_KEY is missing, even for codepaths that don't
@@ -14,7 +14,7 @@ function getClient(): Anthropic {
   return client
 }
 
-export async function callJson(args: ProviderCallArgs): Promise<string> {
+export async function callJson(args: ProviderCallArgs): Promise<ProviderResult> {
   const message = await getClient().messages.create(
     {
       model: args.model,
@@ -25,7 +25,13 @@ export async function callJson(args: ProviderCallArgs): Promise<string> {
     { timeout: args.timeoutMs },
   )
   for (const block of message.content) {
-    if (block.type === 'text') return block.text
+    if (block.type === 'text') {
+      return {
+        text: block.text,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+      }
+    }
   }
   throw new Error('Anthropic response contained no text block')
 }

@@ -1,10 +1,14 @@
 import { generateNode } from '@/lib/ai'
 import { prisma } from '@/lib/db'
 import { isDomainId, DEFAULT_DOMAIN } from '@/lib/domains'
+import { rateLimit } from '@/lib/rateLimit'
 
 const MAX_TOPIC_LENGTH = 200
 
 export async function POST(request: Request) {
+  const limited = rateLimit(request)
+  if (limited) return limited
+
   let body: unknown
   try {
     body = await request.json()
@@ -42,6 +46,7 @@ export async function POST(request: Request) {
           description: data.description,
           hasDiagram: data.needsDiagram,
           status: 'generated',
+          mastery: 'learning',
         },
       })
 

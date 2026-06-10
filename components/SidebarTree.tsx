@@ -45,13 +45,20 @@ export default function SidebarTree({ nodes, selectedNodeId, collapsedNodeIds, o
             <span className="text-[var(--fg-faint)] select-none text-[14px] leading-none">·</span>
           )}
           <span className="flex-1 truncate">{node.label}</span>
-          {isStub && (
+          {isStub ? (
             <span
               className="w-1 h-1 rounded-full shrink-0 opacity-70"
               style={{ background: 'var(--warm)' }}
               aria-hidden="true"
             />
-          )}
+          ) : node.mastery === 'mastered' ? (
+            <span
+              className="w-1.5 h-1.5 rounded-full shrink-0"
+              style={{ background: 'var(--ok)' }}
+              aria-hidden="true"
+              title="Mastered"
+            />
+          ) : null}
         </button>
         {!collapsedNodeIds.has(node.id) && children.map(child => renderNode(child, depth + 1))}
       </div>

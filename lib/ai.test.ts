@@ -23,6 +23,7 @@ vi.mock('@/lib/providers/gemini', () => ({
 
 vi.mock('@/lib/router', () => ({
   pickModel: (...args: unknown[]) => mockPickModel(...args),
+  pickPlannerModel: (...args: unknown[]) => mockPickModel(...args),
   promote: (...args: unknown[]) => mockPromote(...args),
   isRetriable: () => false,
 }))
@@ -31,11 +32,31 @@ vi.mock('@/lib/retrieval', () => ({
   retrieveOrIngest: (...args: unknown[]) => mockRetrieveOrIngest(...args),
 }))
 
-// Plan cache mocked so generateNode's root path never touches the DB.
+// Plan cache mocked so generateNode's planning path never touches the DB.
 vi.mock('@/lib/planCache', () => ({
   getCachedPlan: (...args: unknown[]) => mockGetCachedPlan(...args),
   setCachedPlan: (...args: unknown[]) => mockSetCachedPlan(...args),
+  buildPlanKey: (title: string, ancestorPath: string) =>
+    ancestorPath ? `${ancestorPath} > ${title}` : title,
 }))
+
+// Description cache mocked as always-miss so describeNode hits the provider.
+vi.mock('@/lib/descCache', () => ({
+  getCachedDescription: () => Promise.resolve(null),
+  setCachedDescription: () => Promise.resolve(),
+  buildDescKey: (title: string, ancestorPath: string) =>
+    (ancestorPath ? `${ancestorPath} > ${title}` : title).toLowerCase(),
+}))
+
+// Usage telemetry writes to the DB — stub it out entirely.
+vi.mock('@/lib/usage', () => ({
+  recordUsage: () => {},
+}))
+
+// Providers return { text, inputTokens, outputTokens } — wrap mock payloads.
+function res(text: string) {
+  return { text, inputTokens: 100, outputTokens: 50 }
+}
 
 const mockRagConfig = {
   enabled: false,
@@ -78,9 +99,11 @@ describe('generateNode', () => {
     mockSetCachedPlan.mockResolvedValue(undefined)
     mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) =>
       Promise.resolve(
-        isPlanPrompt(args)
-          ? JSON.stringify({ needsDiagram: true, children: ['Light reactions', 'Calvin cycle'] })
-          : JSON.stringify({ description: 'Plants convert light to energy.' }),
+        res(
+          isPlanPrompt(args)
+            ? JSON.stringify({ needsDiagram: true, children: ['Light reactions', 'Calvin cycle'] })
+            : JSON.stringify({ description: 'Plants convert light to energy.' }),
+        ),
       ),
     )
   })
@@ -123,16 +146,18 @@ describe('generateNode', () => {
     expect(mockPickModel).toHaveBeenCalledWith(
       expect.objectContaining({ taskType: 'expand', depth: 1 }),
     )
-    // Plan cache is root-only.
-    expect(mockGetCachedPlan).not.toHaveBeenCalled()
+    // Plans are cached for every node, keyed by ancestor path + title.
+    expect(mockGetCachedPlan).toHaveBeenCalledWith('Photosynthesis > Light reactions', 'science')
   })
 
   it('parses JSON wrapped in markdown fences', async () => {
     mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) =>
       Promise.resolve(
-        isPlanPrompt(args)
-          ? '```json\n{"needsDiagram":false,"children":[]}\n```'
-          : '```json\n{"description":"Fenced"}\n```',
+        res(
+          isPlanPrompt(args)
+            ? '```json\n{"needsDiagram":false,"children":[]}\n```'
+            : '```json\n{"description":"Fenced"}\n```',
+        ),
       ),
     )
     const { generateNode } = await import('./ai')
@@ -150,9 +175,11 @@ describe('generateNode', () => {
     })
     mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) =>
       Promise.resolve(
-        isPlanPrompt(args)
-          ? JSON.stringify({ needsDiagram: false, children: [] })
-          : JSON.stringify({ description: 'Grounded answer.', confidence: 'high', sourcesCited: [1] }),
+        res(
+          isPlanPrompt(args)
+            ? JSON.stringify({ needsDiagram: false, children: [] })
+            : JSON.stringify({ description: 'Grounded answer.', confidence: 'high', sourcesCited: [1] }),
+        ),
       ),
     )
     const { generateNode } = await import('./ai')
@@ -172,15 +199,15 @@ describe('generateNode', () => {
     let describeCall = 0
     mockAnthropicCall.mockImplementation((args: { messages: { content: string }[] }) => {
       if (isPlanPrompt(args)) {
-        return Promise.resolve(JSON.stringify({ needsDiagram: false, children: [] }))
+        return Promise.resolve(res(JSON.stringify({ needsDiagram: false, children: [] })))
       }
       describeCall++
       return Promise.resolve(
-        JSON.stringify(
+        res(JSON.stringify(
           describeCall === 1
             ? { description: 'Shaky.', confidence: 'low' }
             : { description: 'Retried.', confidence: 'high' },
-        ),
+        )),
       )
     })
 
@@ -199,11 +226,11 @@ describe('answerQuestion', () => {
     mockPickModel.mockReturnValue(haiku)
     mockPromote.mockReturnValue(sonnet)
     mockAnthropicCall.mockResolvedValue(
-      JSON.stringify({
+      res(JSON.stringify({
         answer: 'Chlorophyll absorbs light.',
         classifications: [],
         offerDiagram: false,
-      }),
+      })),
     )
   })
 
@@ -248,12 +275,12 @@ describe('answerQuestion', () => {
       groundingViable: true,
     })
     mockAnthropicCall.mockResolvedValue(
-      JSON.stringify({
+      res(JSON.stringify({
         answer: 'Cited.',
         classifications: [],
         offerDiagram: false,
         sourcesCited: [1, 99, 'bad'],
-      }),
+      })),
     )
     const { answerQuestion } = await import('./ai')
     const result = await answerQuestion('Node', '', 'Root', [], 'Q?', 'general')

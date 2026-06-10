@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import type { ProviderCallArgs } from '@/lib/router'
+import type { ProviderCallArgs, ProviderResult } from '@/lib/router'
 
 // Lazy singleton — see anthropic.ts.
 let genAI: GoogleGenerativeAI | null = null
@@ -12,7 +12,7 @@ function getClient(): GoogleGenerativeAI {
   return genAI
 }
 
-export async function callJson(args: ProviderCallArgs): Promise<string> {
+export async function callJson(args: ProviderCallArgs): Promise<ProviderResult> {
   const model = getClient().getGenerativeModel({
     model: args.model,
     systemInstruction: args.system,
@@ -30,7 +30,11 @@ export async function callJson(args: ProviderCallArgs): Promise<string> {
       contents,
       generationConfig: { maxOutputTokens: args.maxTokens },
     })
-    .then(result => result.response.text())
+    .then((result): ProviderResult => ({
+      text: result.response.text(),
+      inputTokens: result.response.usageMetadata?.promptTokenCount,
+      outputTokens: result.response.usageMetadata?.candidatesTokenCount,
+    }))
 
   if (!args.timeoutMs) return callPromise
 

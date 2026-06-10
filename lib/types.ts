@@ -1,3 +1,5 @@
+export type Mastery = 'unread' | 'learning' | 'mastered'
+
 export type NodeInfo = {
   id: string
   label: string
@@ -5,6 +7,7 @@ export type NodeInfo = {
   status: 'stub' | 'generated'
   parentId: string | null
   hasDiagram: boolean
+  mastery: Mastery
 }
 
 export type DbNode = {
@@ -15,6 +18,7 @@ export type DbNode = {
   description: string | null
   hasDiagram: boolean
   status: string
+  mastery: string
   createdAt: string
 }
 
@@ -49,6 +53,29 @@ export type QAResponse = {
   offerDiagram: boolean
   sources?: Source[]
   confidence?: Confidence
+}
+
+// Quiz question as stored in Quiz.questions (server-side, includes the answer).
+export type QuizQuestion = {
+  question: string
+  options: string[]
+  correctIndex: number
+  explanation: string
+}
+
+// What the client is allowed to see before grading — no correctIndex.
+export type QuizQuestionPublic = {
+  question: string
+  options: string[]
+}
+
+export type QuizGradeResult = {
+  score: number
+  total: number
+  passed: boolean
+  mastery: Mastery
+  // Per-question reveal, index-aligned with the questions.
+  results: { correctIndex: number; correct: boolean; explanation: string }[]
 }
 
 export type Message = {

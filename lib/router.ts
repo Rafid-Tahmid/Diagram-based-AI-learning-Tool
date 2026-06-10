@@ -1,5 +1,5 @@
 
-export type TaskType = 'root' | 'expand' | 'qa'
+export type TaskType = 'root' | 'expand' | 'qa' | 'quiz'
 export type ProviderName = 'anthropic' | 'openai' | 'google'
 
 export type RouteInput = {
@@ -27,6 +27,15 @@ export type ProviderCallArgs = {
   // Per-call timeout in ms. Providers translate this to whatever native
   // option they support; gemini does it via Promise.race.
   timeoutMs?: number
+}
+
+// What every provider's callJson returns. Token counts come from the
+// provider's own usage report — exact, not estimated. Undefined when the
+// provider didn't include usage in the response.
+export type ProviderResult = {
+  text: string
+  inputTokens?: number
+  outputTokens?: number
 }
 
 // ─── provider availability ───────────────────────────────────────────────────
@@ -144,6 +153,7 @@ const OVERRIDE_ENV: Record<TaskType, string> = {
   root: 'MODEL_ROOT',
   expand: 'MODEL_EXPAND',
   qa: 'MODEL_QA',
+  quiz: 'MODEL_QUIZ',
 }
 
 function parseOverride(taskType: TaskType): ModelChoice | null {
@@ -189,6 +199,21 @@ export function pickModel(input: RouteInput): ModelChoice {
   const override = parseOverride(input.taskType)
   if (override) return override
   return pickFromCatalog(requiredTier(input))
+}
+
+// Root-topic curriculum planning gets the best available model: the plan is
+// the spine of the whole learning path AND it's cached per topic across all
+// users, so the premium price (~$0.001 extra) is paid once per topic ever.
+// Only Anthropic ships a premium tier here; otherwise fall back to the
+// regular strong pick. MODEL_ROOT override still wins (checked by caller
+// via pickModel ordering — this is only used when no override is set).
+const PREMIUM_PLANNER: ModelChoice = { provider: 'anthropic', model: 'claude-opus-4-8' }
+
+export function pickPlannerModel(input: RouteInput): ModelChoice {
+  const override = parseOverride(input.taskType)
+  if (override) return override
+  if (input.depth === 0 && availableProviders.has('anthropic')) return PREMIUM_PLANNER
+  return pickFromCatalog('strong')
 }
 
 // Promote: on a retriable error, escalate to the strong tier so the retry has

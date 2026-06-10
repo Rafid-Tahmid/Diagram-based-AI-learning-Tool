@@ -26,6 +26,11 @@
   --warm-text:         color-mix(in oklch, oklch(0.74 0.12 75) 60%, white);
   --warm-soft:         color-mix(in oklch, oklch(0.74 0.12 75) 12%, transparent);
   --warm-border:       color-mix(in oklch, oklch(0.74 0.12 75) 25%, transparent);
+
+  --ok:                oklch(0.72 0.17 150);
+  --ok-text:           color-mix(in oklch, oklch(0.72 0.17 150) 65%, white);
+  --ok-soft:           color-mix(in oklch, oklch(0.72 0.17 150) 14%, transparent);
+  --ok-border:         color-mix(in oklch, oklch(0.72 0.17 150) 35%, transparent);
 }
 
 @theme inline {
@@ -121,6 +126,11 @@ input:-webkit-autofill:focus {
   --warm-text:         oklch(0.48 0.12 75);
   --warm-soft:         color-mix(in oklch, oklch(0.60 0.12 75) 10%, transparent);
   --warm-border:       color-mix(in oklch, oklch(0.60 0.12 75) 20%, transparent);
+
+  --ok:                oklch(0.58 0.15 150);
+  --ok-text:           oklch(0.45 0.15 150);
+  --ok-soft:           color-mix(in oklch, oklch(0.58 0.15 150) 12%, transparent);
+  --ok-border:         color-mix(in oklch, oklch(0.58 0.15 150) 30%, transparent);
 }
 
 [data-theme="light"] * {

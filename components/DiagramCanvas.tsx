@@ -78,6 +78,7 @@ function nodeData(
   const childCount = childCountByNode.get(node.id) ?? 0
   return {
     label: node.label,
+    mastery: node.mastery,
     isRoot: node.parentId === null,
     isSelected: node.id === selectedNodeId,
     isStub: node.status === 'stub',
@@ -114,6 +115,7 @@ function TopicNode({ id, data }: NodeProps) {
   const isCollapsed = data.isCollapsed as boolean
   const childCount = data.childCount as number
   const label = data.label as string
+  const isMastered = data.mastery === 'mastered'
 
   // Compose the body classes for the four primary states. Selection is layered
   // on top via a ring rather than swapping colors, so the underlying state
@@ -124,6 +126,10 @@ function TopicNode({ id, data }: NodeProps) {
   if (isExpanding) {
     body +=
       ' bg-[var(--surface)] border-[var(--accent-border)] text-[var(--fg-muted)] animate-pulse'
+  } else if (isMastered) {
+    body +=
+      ' bg-[linear-gradient(180deg,color-mix(in_oklch,var(--ok)_14%,var(--surface)),color-mix(in_oklch,var(--ok)_6%,var(--surface)))]' +
+      ' border-[var(--ok-border)] text-[var(--fg)] hover:border-[var(--ok)] hover:-translate-y-px'
   } else if (isRoot) {
     body +=
       ' bg-[linear-gradient(180deg,color-mix(in_oklch,var(--accent)_18%,var(--surface)),color-mix(in_oklch,var(--accent)_8%,var(--surface)))]' +
@@ -151,6 +157,18 @@ function TopicNode({ id, data }: NodeProps) {
           style={{ color: 'color-mix(in oklch, var(--accent) 60%, white)' }}
         >
           TOPIC
+        </div>
+      )}
+
+      {isMastered && !isExpanding && (
+        <div
+          className="absolute -top-[7px] -right-[7px] w-[16px] h-[16px] rounded-full flex items-center justify-center border"
+          style={{ background: 'var(--surface)', borderColor: 'var(--ok-border)', color: 'var(--ok-text)' }}
+          title="Mastered"
+        >
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none">
+            <path d="M20 6 L9 17 L4 12" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </div>
       )}
 
@@ -296,6 +314,7 @@ function DiagramCanvasInner({
             data: {
               ...fn.data,
               label: src.label,
+              mastery: src.mastery,
               isStub: src.status === 'stub',
               isExpanding: expandingNodeIds.has(src.id),
               hasChildren: childCount > 0,

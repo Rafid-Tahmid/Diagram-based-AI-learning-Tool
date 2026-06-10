@@ -1,11 +1,13 @@
-import type { GenerateResponse, QAResponse, Source, Confidence } from '@/lib/types'
+import type { GenerateResponse, QAResponse, Source, Confidence, QuizQuestion } from '@/lib/types'
 import {
   pickModel,
+  pickPlannerModel,
   promote,
   isRetriable,
   type RouteInput,
   type ModelChoice,
   type ProviderCallArgs,
+  type ProviderResult,
 } from '@/lib/router'
 import { callJson as anthropicCall } from '@/lib/providers/anthropic'
 import { callJson as openaiCall } from '@/lib/providers/openai'
@@ -14,13 +16,16 @@ import { retrieveOrIngest, type RetrievedChunk } from '@/lib/retrieval'
 import { parseJson } from '@/lib/jsonUtils'
 import { ragConfig } from '@/lib/ragConfig'
 import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
-import { getCachedPlan, setCachedPlan } from '@/lib/planCache'
+import { getCachedPlan, setCachedPlan, buildPlanKey } from '@/lib/planCache'
+import { getCachedDescription, setCachedDescription, buildDescKey } from '@/lib/descCache'
+import { recordUsage } from '@/lib/usage'
 
 // A node is built from two independent calls: a grounded DESCRIBE (content) and
 // an ungrounded PLAN (structure). Each is smaller than the old combined call.
 const MAX_TOKENS_DESCRIBE = 768
 const MAX_TOKENS_PLAN = 512
 const MAX_TOKENS_QA = 2048
+const MAX_TOKENS_QUIZ = 1024
 const REQUEST_TIMEOUT_MS = 60_000
 // Tiny backoff before retry so we don't immediately re-hit a rate limit.
 // Jittered to avoid lockstep retries across concurrent requests.
@@ -33,13 +38,13 @@ const RETRY_BACKOFF_JITTER_MS = 200
 
 // ─── provider dispatch ───────────────────────────────────────────────────────
 
-const providers: Record<ModelChoice['provider'], (args: ProviderCallArgs) => Promise<string>> = {
+const providers: Record<ModelChoice['provider'], (args: ProviderCallArgs) => Promise<ProviderResult>> = {
   anthropic: anthropicCall,
   openai: openaiCall,
   google: geminiCall,
 }
 
-async function callProvider(choice: ModelChoice, args: Omit<ProviderCallArgs, 'model'>): Promise<string> {
+async function callProvider(choice: ModelChoice, args: Omit<ProviderCallArgs, 'model'>): Promise<ProviderResult> {
   return providers[choice.provider]({ ...args, model: choice.model })
 }
 
@@ -147,14 +152,18 @@ function isLowConfidence(parsed: { confidence?: unknown }): boolean {
 
 function logRoute(opts: {
   taskType: RouteInput['taskType']
-  // Which call: grounded content, ungrounded structure, or a Q&A answer.
-  phase: 'describe' | 'plan' | 'qa'
+  // Which call: grounded content, ungrounded structure, a Q&A answer, or a quiz.
+  phase: 'describe' | 'plan' | 'qa' | 'quiz'
   choice: ModelChoice
   depth: number
   historyLen: number
   latencyMs: number
   inputChars: number
   outputChars: number
+  // Exact token counts from the provider's usage report (undefined when the
+  // provider didn't include them).
+  inputTokens?: number
+  outputTokens?: number
   retried: boolean
   grounded: boolean
   retrievalTopScore: number
@@ -173,6 +182,8 @@ function logRoute(opts: {
     latencyMs: opts.latencyMs,
     inputCharsApprox: opts.inputChars,
     outputCharsApprox: opts.outputChars,
+    inputTokens: opts.inputTokens,
+    outputTokens: opts.outputTokens,
     retried: opts.retried,
     grounded: opts.grounded,
     retrievalTopScore: opts.retrievalTopScore,
@@ -180,6 +191,31 @@ function logRoute(opts: {
     confidenceRetried: opts.confidenceRetried,
     confidence: opts.confidence,
   }))
+
+  recordUsage({
+    taskType: opts.taskType,
+    phase: opts.phase,
+    provider: opts.choice.provider,
+    model: opts.choice.model,
+    inputTokens: opts.inputTokens,
+    outputTokens: opts.outputTokens,
+    latencyMs: opts.latencyMs,
+    grounded: opts.grounded,
+    retried: opts.retried,
+  })
+}
+
+// Telemetry row for a cache hit — zero tokens, near-zero latency, and the
+// dashboard uses these to compute "saved by caching".
+function logCacheHit(taskType: RouteInput['taskType'], phase: 'describe' | 'plan', latencyMs: number) {
+  recordUsage({
+    taskType,
+    phase,
+    provider: 'cache',
+    model: `${phase}-cache`,
+    latencyMs,
+    cacheHit: true,
+  })
 }
 
 // ─── public API ──────────────────────────────────────────────────────────────
@@ -220,7 +256,18 @@ async function describeNode(
   taskType: RouteInput['taskType'],
   depth: number,
 ): Promise<DescribeResult> {
-  const domainSources = DOMAINS[isDomainId(domain) ? domain : DEFAULT_DOMAIN].sources
+  const domainKey = isDomainId(domain) ? domain : DEFAULT_DOMAIN
+  const domainSources = DOMAINS[domainKey].sources
+
+  // Cross-session cache: a concept already described for one user serves all
+  // future users from the DB — no retrieval, no AI call.
+  const descStart = Date.now()
+  const descKey = buildDescKey(title, ancestorPath)
+  const cached = await getCachedDescription(descKey, domainKey)
+  if (cached) {
+    logCacheHit(taskType, 'describe', Date.now() - descStart)
+    return cached
+  }
 
   const retrieval = ragConfig.enabled
     ? await retrieveOrIngest({ topic: title, ancestorPath }, domainSources)
@@ -232,12 +279,12 @@ async function describeNode(
 
   const start = Date.now()
   const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
-    const raw = await callProvider(c, {
+    const res = await callProvider(c, {
       messages: [{ role: 'user', content: prompt }],
       maxTokens: MAX_TOKENS_DESCRIBE,
       timeoutMs: REQUEST_TIMEOUT_MS,
     })
-    return { parsed: parseJson<DescribeParsed>(raw), raw }
+    return { parsed: parseJson<DescribeParsed>(res.text), res }
   })
 
   // Confidence retry: low-confidence grounded answer → one retry on the strong
@@ -245,7 +292,7 @@ async function describeNode(
   // original answer (never blocks the user).
   let finalParsed = value.parsed
   let finalChoice = choice
-  let finalRawLen = value.raw.length
+  let finalRes = value.res
   let confidenceRetried = false
   if (retrieval.groundingViable && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
     const strong = promote(choice)
@@ -253,14 +300,14 @@ async function describeNode(
     if (!alreadyStrong) {
       try {
         const fallbackPrompt = buildDescribePrompt(title, ancestorPath, [])
-        const raw = await callProvider(strong, {
+        const res = await callProvider(strong, {
           messages: [{ role: 'user', content: fallbackPrompt }],
           maxTokens: MAX_TOKENS_DESCRIBE,
           timeoutMs: REQUEST_TIMEOUT_MS,
         })
-        finalParsed = parseJson<DescribeParsed>(raw)
+        finalParsed = parseJson<DescribeParsed>(res.text)
         finalChoice = strong
-        finalRawLen = raw.length
+        finalRes = res
         confidenceRetried = true
       } catch (retryErr) {
         console.warn(JSON.stringify({
@@ -288,7 +335,9 @@ async function describeNode(
     historyLen: 0,
     latencyMs: Date.now() - start,
     inputChars: prompt.length,
-    outputChars: finalRawLen,
+    outputChars: finalRes.text.length,
+    inputTokens: finalRes.inputTokens,
+    outputTokens: finalRes.outputTokens,
     retried,
     grounded: retrieval.groundingViable,
     retrievalTopScore: retrieval.topScore,
@@ -297,11 +346,13 @@ async function describeNode(
     confidence,
   })
 
-  return {
+  const result: DescribeResult = {
     description: typeof finalParsed.description === 'string' ? finalParsed.description : '',
     sources: mapSourcesCited(finalParsed.sourcesCited, retrieval.chunks),
     confidence,
   }
+  await setCachedDescription(descKey, domainKey, result)
+  return result
 }
 
 // ── structure half: ungrounded curriculum plan ──────────────────────────────
@@ -332,18 +383,20 @@ async function planChildren(
   depth: number,
 ): Promise<PlanResult> {
   // No retrieval on purpose: curriculum structure is reasoning, not recall.
-  // Omitting retrievalScore makes the router select the strong tier (Sonnet).
-  const initial = pickModel({ taskType, depth, historyLen: 0 })
+  // Root topics route to the premium tier (the plan is the spine of the whole
+  // path and it's cached per topic, so the extra cost is paid once ever);
+  // deeper nodes use the regular strong tier.
+  const initial = pickPlannerModel({ taskType, depth, historyLen: 0 })
   const prompt = buildPlanPrompt(title, ancestorPath)
 
   const start = Date.now()
   const { value, choice, retried } = await withRetry(taskType, initial, async (c) => {
-    const raw = await callProvider(c, {
+    const res = await callProvider(c, {
       messages: [{ role: 'user', content: prompt }],
       maxTokens: MAX_TOKENS_PLAN,
       timeoutMs: REQUEST_TIMEOUT_MS,
     })
-    return { parsed: parseJson<PlanParsed>(raw), raw }
+    return { parsed: parseJson<PlanParsed>(res.text), res }
   })
 
   logRoute({
@@ -354,7 +407,9 @@ async function planChildren(
     historyLen: 0,
     latencyMs: Date.now() - start,
     inputChars: prompt.length,
-    outputChars: value.raw.length,
+    outputChars: value.res.text.length,
+    inputTokens: value.res.inputTokens,
+    outputTokens: value.res.outputTokens,
     retried,
     grounded: false,
     retrievalTopScore: 0,
@@ -377,24 +432,27 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
   // /api/generate must pass '' for root — see route comment there.
   const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
   const taskType: RouteInput['taskType'] = ancestorPath ? 'expand' : 'root'
-  const isRoot = !ancestorPath
   const domainKey = isDomainId(domain) ? domain : DEFAULT_DOMAIN
 
   // Content (grounded, cheap) and structure (ungrounded, strong) are
-  // independent — run in parallel. For root topics the structure is plan-cached,
-  // so a repeat question skips the strong planning call entirely.
+  // independent — run in parallel. Plans are cached for EVERY node (keyed by
+  // ancestor path + title), so any node already planned for one user skips
+  // the strong planning call for all future users.
   const describePromise = describeNode(title, ancestorPath, domain, taskType, depth)
   const planPromise: Promise<PlanResult> = (async () => {
-    if (isRoot) {
-      const cached = await getCachedPlan(title, domainKey)
-      if (cached) return cached
+    const planKey = buildPlanKey(title, ancestorPath)
+    const cacheStart = Date.now()
+    const cached = await getCachedPlan(planKey, domainKey)
+    if (cached) {
+      logCacheHit(taskType, 'plan', Date.now() - cacheStart)
+      return cached
     }
     const fresh = await planChildren(title, ancestorPath, taskType, depth)
     // Only cache a non-empty plan. An atomic topic legitimately returns no
     // children, but so does a transient bad plan — caching empty would freeze
     // that topic as childless forever (no eviction). Re-planning the rare
     // genuinely-atomic topic is cheap.
-    if (isRoot && fresh.children.length > 0) await setCachedPlan(title, domainKey, fresh)
+    if (fresh.children.length > 0) await setCachedPlan(planKey, domainKey, fresh)
     return fresh
   })()
 
@@ -407,6 +465,120 @@ export async function generateNode(title: string, ancestorPath: string, domain: 
     sources: described.sources,
     confidence: described.confidence,
   }
+}
+
+// ── quiz: grounded mastery check ─────────────────────────────────────────────
+
+function buildQuizPrompt(
+  title: string,
+  description: string,
+  ancestorPath: string,
+  chunks: RetrievedChunk[],
+): string {
+  const sourcesBlock = formatSourcesBlock(chunks)
+
+  return `You are writing a mastery quiz for a learner who just studied a concept.
+Write exactly 4 multiple-choice questions testing UNDERSTANDING of the concept
+(not trivia). Each question has exactly 4 options with exactly one correct.
+
+Return ONLY valid JSON, no markdown:
+{
+  "questions": [
+    {
+      "question": "the question text",
+      "options": ["option A", "option B", "option C", "option D"],
+      "correctIndex": 0,
+      "explanation": "why the correct option is right, 12 words max"
+    }
+  ]
+}
+
+Rules:
+- Keep it tight: questions ≤ 20 words, options ≤ 10 words, explanations ≤ 12 words.
+- Distractors must be plausible but clearly wrong to someone who understood the concept.
+- Vary correctIndex across questions; never reference option letters in the text.${sourcesBlock}
+
+Context: ${ancestorPath}
+Concept: ${title}
+What the learner studied: ${description}`
+}
+
+function parseQuizQuestions(raw: unknown): QuizQuestion[] {
+  if (typeof raw !== 'object' || raw === null) return []
+  const list = (raw as { questions?: unknown }).questions
+  if (!Array.isArray(list)) return []
+  const valid: QuizQuestion[] = []
+  for (const q of list) {
+    if (typeof q !== 'object' || q === null) continue
+    const { question, options, correctIndex, explanation } = q as Record<string, unknown>
+    if (typeof question !== 'string' || !question.trim()) continue
+    if (!Array.isArray(options) || options.length !== 4) continue
+    if (!options.every((o): o is string => typeof o === 'string' && o.trim().length > 0)) continue
+    if (!Number.isInteger(correctIndex) || (correctIndex as number) < 0 || (correctIndex as number) > 3) continue
+    valid.push({
+      question,
+      options,
+      correctIndex: correctIndex as number,
+      explanation: typeof explanation === 'string' ? explanation : '',
+    })
+  }
+  return valid
+}
+
+export async function generateQuiz(
+  title: string,
+  description: string,
+  ancestorPath: string,
+  domain: DomainId = DEFAULT_DOMAIN,
+): Promise<QuizQuestion[]> {
+  const depth = ancestorPath ? ancestorPath.split(' > ').length : 0
+  const domainSources = DOMAINS[isDomainId(domain) ? domain : DEFAULT_DOMAIN].sources
+
+  // The node's description already exists, so the topic is in the corpus —
+  // this is almost always a cache hit, routing the quiz to the cheap tier.
+  const retrieval = ragConfig.enabled
+    ? await retrieveOrIngest({ topic: title, ancestorPath }, domainSources)
+    : { chunks: [], topScore: 0, groundingViable: false }
+
+  const initial = pickModel({ taskType: 'quiz', depth, historyLen: 0, retrievalScore: retrieval.topScore })
+  const prompt = buildQuizPrompt(title, description, ancestorPath, retrieval.groundingViable ? retrieval.chunks : [])
+
+  const start = Date.now()
+  // Validation lives inside the retry callback: a structurally-bad quiz from
+  // the cheap model retries once on the strong tier like any parse failure.
+  const { value, choice, retried } = await withRetry('quiz', initial, async (c) => {
+    const res = await callProvider(c, {
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: MAX_TOKENS_QUIZ,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    })
+    const questions = parseQuizQuestions(parseJson<unknown>(res.text))
+    if (questions.length < 3) {
+      throw new Error(`Model returned non-JSON quiz: only ${questions.length} valid questions`)
+    }
+    return { questions, res }
+  })
+
+  logRoute({
+    taskType: 'quiz',
+    phase: 'quiz',
+    choice,
+    depth,
+    historyLen: 0,
+    latencyMs: Date.now() - start,
+    inputChars: prompt.length,
+    outputChars: value.res.text.length,
+    inputTokens: value.res.inputTokens,
+    outputTokens: value.res.outputTokens,
+    retried,
+    grounded: retrieval.groundingViable,
+    retrievalTopScore: retrieval.topScore,
+    retrievedChunkCount: retrieval.chunks.length,
+    confidenceRetried: false,
+    confidence: undefined,
+  })
+
+  return value.questions
 }
 
 type QAParsed = Partial<QAResponse> & {
@@ -474,18 +646,18 @@ export async function answerQuestion(
 
   const start = Date.now()
   const { value, choice, retried } = await withRetry('qa', initial, async (c) => {
-    const raw = await callProvider(c, {
+    const res = await callProvider(c, {
       system,
       messages,
       maxTokens: MAX_TOKENS_QA,
       timeoutMs: REQUEST_TIMEOUT_MS,
     })
-    return { parsed: parseJson<QAParsed>(raw), raw }
+    return { parsed: parseJson<QAParsed>(res.text), res }
   })
 
   let finalParsed = value.parsed
   let finalChoice = choice
-  let finalRawLen = value.raw.length
+  let finalRes = value.res
   let confidenceRetried = false
   if (retrieval.groundingViable && ragConfig.confidenceRetry && isLowConfidence(value.parsed)) {
     const strong = promote(choice)
@@ -495,15 +667,15 @@ export async function answerQuestion(
       // discard the valid first answer.
       try {
         const fallbackSystem = buildQASystemPrompt(nodeTitle, nodeDescription, ancestorPath, [])
-        const raw = await callProvider(strong, {
+        const res = await callProvider(strong, {
           system: fallbackSystem,
           messages,
           maxTokens: MAX_TOKENS_QA,
           timeoutMs: REQUEST_TIMEOUT_MS,
         })
-        finalParsed = parseJson<QAParsed>(raw)
+        finalParsed = parseJson<QAParsed>(res.text)
         finalChoice = strong
-        finalRawLen = raw.length
+        finalRes = res
         confidenceRetried = true
       } catch (retryErr) {
         console.warn(JSON.stringify({
@@ -532,7 +704,9 @@ export async function answerQuestion(
     historyLen: history.length,
     latencyMs,
     inputChars,
-    outputChars: finalRawLen,
+    outputChars: finalRes.text.length,
+    inputTokens: finalRes.inputTokens,
+    outputTokens: finalRes.outputTokens,
     retried,
     grounded: retrieval.groundingViable,
     retrievalTopScore: retrieval.topScore,

@@ -17,67 +17,21 @@ Content is generated lazily — nothing is fetched until you click. Supports lig
 
 ## Getting started
 
-1. Install dependencies:
+Three commands:
 
 ```bash
 npm install
-```
-
-2. Create a free [Neon](https://neon.tech) project (Postgres 17). Copy the connection string from the dashboard.
-
-3. Create two env files in the project root:
-
-**`.env`** (Prisma CLI reads this, not `.env.local`):
-```
-DATABASE_URL=postgresql://<user>:<password>@<host>/neondb?sslmode=require
-```
-
-**`.env.local`** (app + Prisma at runtime):
-```
-ANTHROPIC_API_KEY=sk-ant-...
-DATABASE_URL=postgresql://<user>:<password>@<host>/neondb?sslmode=require
-```
-
-   To enable RAG grounding, add an embedding provider (Google is preferred — cheaper and on a separate quota):
-
-```
-GOOGLE_AI_API_KEY=...
-```
-
-   Or OpenAI:
-
-```
-OPENAI_API_KEY=...
-```
-
-4. Apply the Prisma schema:
-
-```bash
-npx prisma db push
-```
-
-5. Apply the pgvector column via Neon's SQL Editor:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-ALTER TABLE "Chunk" ADD COLUMN IF NOT EXISTS embedding vector(3072);
-```
-
-   And the PlanCache table (kept out of `prisma db push` because a push would drop the out-of-schema `embedding` column):
-
-```bash
-npx prisma db execute --file prisma/sql/002_plancache.sql --schema prisma/schema.prisma
-```
-
-6. Start the dev server:
-
-```bash
+npm run setup     # creates .env.local, sets up the database (guided)
 npm run dev
 ```
 
-Open <http://localhost:3000> and type a topic.
+Open <http://localhost:3000>. If no AI key is configured yet, the app shows a banner — click **Open Settings**, paste an [Anthropic API key](https://console.anthropic.com), hit **Save key**, done.
 
-The app works with only `ANTHROPIC_API_KEY` — RAG degrades gracefully to ungrounded generation when no embedding provider is configured.
+What `npm run setup` needs from you: a `DATABASE_URL` in `.env.local` — free Postgres from [Neon](https://neon.tech) (create project → copy connection string). The script creates `.env.local` from the template on first run, then handles everything else itself: Prisma client, schema, pgvector, and all migrations. Safe to re-run any time.
+
+Optional, for grounded answers with citations + cheaper model routing: add a `GOOGLE_AI_API_KEY` ([AI Studio](https://aistudio.google.com)) or `OPENAI_API_KEY` — pasteable on the Settings page too. The app works fine without one; answers just run ungrounded.
+
+The **Settings page** (gear icon) also shows a live usage dashboard: token spend by model, cost estimates, cache savings, and what share of content is served from the database vs generated through an AI API.
 
 ## Project layout
 

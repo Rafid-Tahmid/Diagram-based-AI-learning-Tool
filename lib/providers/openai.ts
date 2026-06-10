@@ -1,5 +1,5 @@
 import OpenAI from 'openai'
-import type { ProviderCallArgs } from '@/lib/router'
+import type { ProviderCallArgs, ProviderResult } from '@/lib/router'
 
 // Lazy singleton — see anthropic.ts. Especially important here because the
 // current router never picks OpenAI, so requiring OPENAI_API_KEY at boot
@@ -14,7 +14,7 @@ function getClient(): OpenAI {
   return client
 }
 
-export async function callJson(args: ProviderCallArgs): Promise<string> {
+export async function callJson(args: ProviderCallArgs): Promise<ProviderResult> {
   const messages: OpenAI.ChatCompletionMessageParam[] = []
   if (args.system) messages.push({ role: 'system', content: args.system })
   for (const m of args.messages) {
@@ -31,5 +31,9 @@ export async function callJson(args: ProviderCallArgs): Promise<string> {
     },
     { timeout: args.timeoutMs },
   )
-  return res.choices[0]?.message.content ?? ''
+  return {
+    text: res.choices[0]?.message.content ?? '',
+    inputTokens: res.usage?.prompt_tokens,
+    outputTokens: res.usage?.completion_tokens,
+  }
 }

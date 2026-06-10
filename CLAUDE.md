@@ -58,9 +58,12 @@ Content is never generated until a user requests it.
 **Diagram tree:**
 ```
 Session { id, domain }
-Node    { id, sessionId, parentId?, title, description?, hasDiagram, status("stub"|"generated"), ordinal, createdAt }
+Node    { id, sessionId, parentId?, title, description?, hasDiagram, status("stub"|"generated"), ordinal, mastery("unread"|"learning"|"mastered"), createdAt }
         // ordinal = sibling order (planner's foundational→advanced). Required: createMany
         // gives siblings equal createdAt + random-uuid id, so without it order is lost.
+        // mastery = learner progress, separate from generation status.
+Quiz    { id, nodeId @unique, questions Json, createdAt }
+        // questions include correctIndex — server-side only, stripped before sending to client
 ```
 
 **Q&A (separate from diagram tree):**
@@ -75,10 +78,18 @@ Chunk { id, docId, content, breadcrumb, url, source, createdAt }
       + embedding vector(3072) managed via raw SQL (Prisma 5 has no vector type)
 ```
 
-**Learning-path cache (separate from corpus):**
+**Caches (separate from corpus):**
 ```
-PlanCache { id, topic (normalized), domain, plan Json { needsDiagram, children[] }, createdAt }
+PlanCache { id, topic (normalized "path > title" key, ALL nodes), domain, plan Json, createdAt }
           @@unique([topic, domain])
+DescCache { id, key (normalized "path > title"), domain, description, sources Json?, confidence?, createdAt }
+          @@unique([key, domain])  // cross-session description reuse
+```
+
+**Telemetry:**
+```
+Usage { id, createdAt, taskType, phase, provider, model, inputTokens?, outputTokens?,
+        latencyMs, grounded, retried, cacheHit }   // one row per AI call or cache hit
 ```
 
 ## Two Interaction Flows
@@ -131,9 +142,59 @@ Load only when working in the relevant area:
 | 9 — Navigation Polish | ✅ | Sidebar tree, clickable breadcrumb, reset |
 | 11 — Multi-Source Ingestion | ✅ | Fetch every domain source per topic, merge into corpus |
 | 12 — Learning-Path Planner | ✅ | Split structure (strong, ordered) from content (RAG, cheap); plan cache |
+| 13 — Mastery Loop | ✅ | Per-node quiz + unread/learning/mastered states + map colors by progress |
+| 14 — Cost Engine + Usage Analytics | ✅ | All-node plan/desc caches, Opus root plans, real token telemetry, /settings dashboard |
+
+## Product Roadmap (agreed 2026-06-10)
+Thesis: **"Duolingo for any topic"** — the persistent visual map is the differentiator vs chat AIs; the shared caches make the Nth user near-free (cost moat).
+- Phase 13 — Mastery loop ✅
+- Phase 14 — Cost engine + usage analytics ✅
+- Phase 15 — Shareable maps: public read-only map pages served from DB, zero AI cost, SEO/viral distribution
+- Phase 16 — Identity: anon-cookie user → "my maps" home → accounts (prereq for per-user API keys in /settings)
 
 ## Current Phase
-**All phases complete.**
+**Phase 15 — Shareable Maps (not started).**
+
+### Phase 14 — Cost Engine + Usage Analytics
+**Goal:** make the backend measurably cheap/fast/accurate and give the operator a provider-agnostic settings + analytics surface.
+
+**What changed:**
+- **All-node plan cache:** `PlanCache` key is now `buildPlanKey(title, ancestorPath)` (normalized "path > title"), not root-only — any node planned once is planned forever, for every user.
+- **Cross-session description cache:** new `DescCache` table (`lib/descCache.ts`); a described concept serves all future sessions from the DB. Empty and low-confidence descriptions are never cached.
+- **Premium root planning:** `pickPlannerModel` in `lib/router.ts` routes depth-0 plans to `claude-opus-4-8` (the curriculum is the product's spine; cached per topic, so ~$0.004 once ever). `MODEL_ROOT` override still wins. Deeper plans stay strong-tier.
+- **Real token telemetry:** providers now return `ProviderResult { text, inputTokens, outputTokens }` (exact provider-reported usage). Every AI call AND cache hit lands in the new `Usage` table via `lib/usage.ts` (fire-and-forget, never blocks).
+- **`/settings` page:** provider status + paste-a-key live testing (keys NEVER persisted — env-only until auth exists), usage dashboard (cost by model, latency/grounded/cache-savings by phase, corpus stats). Routes: `/api/providers` (GET status, POST rate-limited key test), `/api/usage` (aggregates).
+- Quiz prompt tightened (≤ 20-word questions, ≤ 12-word explanations) — quiz was the slowest, most output-heavy call.
+- Migration `prisma/sql/004_usage_desccache.sql` (raw SQL, NOT `db push` — pgvector precedent).
+
+**Measured (live):** root "Machine Learning": Opus 4.8 plan 297→111 tokens $0.0043 + Sonnet describe; repeat call = 0 AI calls, identical curriculum + description, dashboard shows hits + $ saved.
+
+**Known operational issue:** both embedding keys are quota-exhausted → RAG silently ungrounded → all calls route to the strong tier. Fund either key (OpenAI: also needs pgvector 3072→1536 column migration + re-embed; Google: drop-in). The /settings page surfaces this live ("Quota exhausted").
+
+**Follow-up pass (same phase):**
+- **DB-vs-API content split** on the dashboard — % of content events served from caches (green) vs provider APIs, computed from `Usage.cacheHit`. Quiz route now records a `quiz-cache` hit when serving an existing quiz.
+- **Save key from /settings** — validates the key against the provider, then writes it to `.env.local` (dev mode ONLY; production returns 403 — an unauthenticated env-writing endpoint would be a takeover vector). Next dev auto-reloads env files. Keys never logged/echoed/stored in DB.
+- **`npm run setup`** (`scripts/setup.mjs`) — one-command bootstrap: creates `.env.local` from `.env.example`, syncs DATABASE_URL into `.env` for the Prisma CLI, generates the client, detects fresh vs existing DB (fresh → `db push` + all SQL; existing → idempotent SQL only, never push). README is now: install → setup → dev.
+- **First-run banner** in the app when no provider key is configured, linking to /settings.
+
+### Phase 13 — Mastery Loop
+**Goal:** Quiz per node + per-node mastery state + map colors by progress, so the map becomes a visible mastery dashboard.
+
+**What changed:**
+- `Node.mastery` (`unread → learning → mastered`) + new `Quiz` table (one lazy quiz per node, `nodeId @unique`). Raw-SQL migration `prisma/sql/003_mastery.sql` (NOT `db push` — pgvector precedent).
+- `lib/ai.ts` `generateQuiz` — 4 MCQs grounded via `retrieveOrIngest`, score-routed (corpus warm by quiz time → usually cheap tier). Structural validation inside the retry callback so a malformed cheap-model quiz promotes to strong.
+- `/app/api/quiz` — POST generates-or-serves questions **without** correct answers; PUT grades server-side (pass = ceil(75%)) and sets `mastery: "mastered"`. Answers never reach the client pre-grading.
+- Mastery transitions: root + expanded nodes set `learning` at generation; quiz pass sets `mastered`.
+- UI: NodePanel **Quiz** tab (explicit "Start quiz" button — no AI spend on tab open); canvas node green tint + check badge when mastered; SidebarTree green dot.
+- Security pass: per-IP rate limiting (`lib/rateLimit.ts`, 20 req/min) on all AI-spending routes (generate, node expand, qa, quiz).
+- Fixed pre-existing StrictMode bug: NodePanel `mountedRef` stayed `false` after dev double-mount, silently dropping async state updates.
+
+**Done when:** open generated node → Quiz tab → 4 MCQs → pass ≥3/4 → node turns green on canvas → refresh persists. ✅ verified live via Playwright E2E (fail-then-retake flow, badge survives reload).
+
+### Phase 14 — Shareable Maps
+**Goal:** Public read-only `/m/[sessionId]` pages rendering an explored map straight from the DB — zero AI cost to serve, SEO-able, shareable. Distribution channel for content that's already paid for.
+**Done when:** a share link opens the full explored tree read-only (descriptions + diagram, no quiz/Q&A mutation), loads with no AI calls, and has basic meta tags (title = topic).
+**Do NOT build:** accounts, my-maps home (Phase 15), edit-by-visitor, forking shared maps.
 
 ### Phase 12 — Learning-Path Planner
 **Goal:** Stop generating a random subtopic tree. Split node generation into a deliberate curriculum *structure* (strong model, ungrounded, foundational→advanced ordering) and lazy grounded *descriptions* (RAG + cheap model). Cache the structure per topic for reuse.

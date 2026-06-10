@@ -28,8 +28,12 @@ model Node {
   // createdAt and id is a random uuid — without this the learning-path order is
   // lost on the DB round-trip.
   ordinal     Int         @default(0)
+  // Learner progress, distinct from generation status: "unread" (stub) →
+  // "learning" (description generated) → "mastered" (quiz passed).
+  mastery     String      @default("unread")
   createdAt   DateTime    @default(now())
   qaMessages  QAMessage[]
+  quiz        Quiz?
   session     Session     @relation(fields: [sessionId], references: [id])
 
   @@index([sessionId])
@@ -76,6 +80,53 @@ model Chunk {
   // push that rebuilds Chunk.
 
   @@index([docId])
+}
+
+// One lazily-generated quiz per node. Questions Json holds the full shape
+// including correctIndex — NEVER returned to the client before grading; the
+// quiz API strips answers from GET/generate responses and grades server-side.
+model Quiz {
+  id        String   @id @default(uuid())
+  nodeId    String   @unique
+  questions Json
+  createdAt DateTime @default(now())
+  node      Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+}
+
+// One telemetry row per AI call (and per cache hit, with cacheHit=true and
+// zero tokens). Powers the /settings usage dashboard. Token counts come from
+// provider responses when available; null means the provider didn't report.
+model Usage {
+  id           String   @id @default(uuid())
+  createdAt    DateTime @default(now())
+  taskType     String
+  phase        String
+  provider     String
+  model        String
+  inputTokens  Int?
+  outputTokens Int?
+  latencyMs    Int
+  grounded     Boolean  @default(false)
+  retried      Boolean  @default(false)
+  cacheHit     Boolean  @default(false)
+
+  @@index([createdAt])
+  @@index([phase])
+}
+
+// Cross-session description cache. Key = normalized "ancestorPath > title".
+// A repeat topic serves its description from here instead of a fresh grounded
+// generation — descriptions of stable educational concepts rarely change.
+model DescCache {
+  id          String   @id @default(uuid())
+  key         String
+  domain      String
+  description String
+  sources     Json?
+  confidence  String?
+  createdAt   DateTime @default(now())
+
+  @@unique([key, domain])
 }
 
 // Cached learning-path STRUCTURE keyed by question — lets a repeat topic skip the

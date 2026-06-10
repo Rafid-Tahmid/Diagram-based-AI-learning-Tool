@@ -1,11 +1,12 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import Link from 'next/link'
 import DiagramCanvas from '@/components/DiagramCanvas'
 import NodePanel from '@/components/NodePanel'
 import Breadcrumb from '@/components/Breadcrumb'
 import SidebarTree from '@/components/SidebarTree'
-import type { NodeInfo, Message, DbNode, QAClassification } from '@/lib/types'
+import type { NodeInfo, Message, DbNode, QAClassification, Mastery } from '@/lib/types'
 import { buildPath, hasCollapsedAncestor, removeFromSet, addToSet } from '@/lib/treeUtils'
 import { DOMAINS, DEFAULT_DOMAIN, isDomainId, type DomainId } from '@/lib/domains'
 
@@ -26,6 +27,7 @@ function dbNodeToInfo(n: DbNode): NodeInfo {
     status: n.status as 'stub' | 'generated',
     parentId: n.parentId,
     hasDiagram: n.hasDiagram,
+    mastery: n.mastery === 'learning' || n.mastery === 'mastered' ? n.mastery : 'unread',
   }
 }
 
@@ -143,6 +145,7 @@ export default function Home() {
   const [recentSessions, setRecentSessions] = useState<DbSession[]>([])
   const [showHistory, setShowHistory] = useState(false)
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
+  const [needsProviderKey, setNeedsProviderKey] = useState(false)
   const historyRef = useRef<HTMLDivElement>(null)
   const loadedThreadsRef = useRef<Set<string>>(new Set())
   const expandingRef = useRef<Set<string>>(new Set())
@@ -178,6 +181,15 @@ export default function Home() {
     fetchSessions().then(sessions => {
       if (!cancelled) setRecentSessions(sessions)
     })
+
+    fetch('/api/providers')
+      .then(res => res.json())
+      .then((json: unknown) => {
+        if (cancelled || !json || typeof json !== 'object' || !('data' in json)) return
+        const data = (json as { data: { providers: { keyConfigured: boolean }[] } }).data
+        setNeedsProviderKey(!data.providers.some(p => p.keyConfigured))
+      })
+      .catch(() => {})
 
     work.finally(() => {
       if (!cancelled) setSessionLoading(false)
@@ -441,6 +453,12 @@ export default function Home() {
     setNodeMessages(prev => new Map(prev).set(nodeId, messages))
   }, [])
 
+  const handleMasteryChange = useCallback((nodeId: string, mastery: Mastery) => {
+    setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, mastery } : n))
+    setSelectedNode(current => current?.id === nodeId ? { ...current, mastery } : current)
+    setNodePath(prev => prev.map(n => n.id === nodeId ? { ...n, mastery } : n))
+  }, [])
+
   if (sessionLoading) {
     return (
       <main className="flex items-center justify-center h-screen bg-[var(--bg)]">
@@ -479,6 +497,16 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-1.5">
+          <Link
+            href="/settings"
+            className="flex items-center justify-center w-8 h-8 rounded-md text-[var(--fg-muted)] hover:text-[var(--fg)] hover:bg-[var(--surface)] transition-colors"
+            aria-label="Settings and usage"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </Link>
           <button
             onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
             className="flex items-center justify-center w-8 h-8 rounded-md text-[var(--fg-muted)] hover:text-[var(--fg)] hover:bg-[var(--surface)] transition-colors"
@@ -610,6 +638,25 @@ export default function Home() {
         </div>
       </div>
 
+      {/* First-run: no AI provider configured */}
+      {needsProviderKey && (
+        <div
+          className="px-5 py-2 border-b border-[var(--hairline)] shrink-0 flex items-center justify-between gap-3"
+          style={{ background: 'var(--accent-faint)' }}
+        >
+          <p className="text-[12px] m-0 text-[var(--fg)]">
+            Almost there — add an AI provider key to start generating diagrams.
+          </p>
+          <Link
+            href="/settings"
+            className="text-[12px] text-white px-3 py-1.5 rounded-md shrink-0 transition-[filter] hover:brightness-110"
+            style={{ background: 'var(--accent)' }}
+          >
+            Open Settings
+          </Link>
+        </div>
+      )}
+
       {/* Error banner */}
       {error && (
         <div
@@ -678,6 +725,7 @@ export default function Home() {
             onClose={handleClose}
             messages={nodeMessages.get(selectedNode.id) ?? []}
             onMessagesChange={msgs => handleMessagesChange(selectedNode.id, msgs)}
+            onMasteryChange={handleMasteryChange}
             ancestorPath={nodePath.map(n => n.label).join(' › ')}
             isExpanding={expandingNodes.has(selectedNode.id)}
             domain={domain}

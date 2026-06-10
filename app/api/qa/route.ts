@@ -1,6 +1,7 @@
 import { answerQuestion } from '@/lib/ai'
 import { prisma } from '@/lib/db'
 import { isDomainId, DEFAULT_DOMAIN, type DomainId } from '@/lib/domains'
+import { rateLimit } from '@/lib/rateLimit'
 
 type QABody = {
   nodeId: string
@@ -63,6 +64,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const limited = rateLimit(request)
+  if (limited) return limited
+
   let raw: unknown
   try {
     raw = await request.json()
